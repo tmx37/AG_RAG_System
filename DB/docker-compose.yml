@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  memgraph:
+    image: memgraph/memgraph-platform:latest
+    container_name: memgraph-graphrag-demo
+    platform: linux/amd64
+    ports:
+      # Memgraph Lab UI
+      - "3000:3000"
+      # Bolt Protocol (for Python/Node clients)
+      - "7687:7687"
+      # Prometheus Metrics (optional, good for monitoring demo perf)
+      - "9090:9090"
+    volumes:
+      # Persist data so you don't lose your graph on restart
+      - mg_data:/var/lib/memgraph
+    environment:
+      # Allow connections from any IP (crucial for remote demo access)
+      - MEMGRAPH_ARGS=--bolt-address=0.0.0.0 --http-address=0.0.0.0 --storage-snapshot-interval-sec=60
+      # Increase memory limit if needed (default is often enough for demos)
+      - MEMGRAPH_MEMORY_LIMIT=4G
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mg_data:
+    name: memgraph-graphrag-demo-data
