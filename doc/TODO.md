@@ -1,5 +1,5 @@
 # Preparation_1
-- [ ] Find a valid raw database
+- [x] Find valid raw data
 - [ ] Find a clear way to count tokens (for both input and output operations)
 - [ ] Find a good model and prompt for serialization
 - [ ] Create a GraphDB
