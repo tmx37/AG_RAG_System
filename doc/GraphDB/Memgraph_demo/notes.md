@@ -1,11 +1,4 @@
-# Implementation notes
-
-### Requisites
-- Docker
-- Python 3.0
-- Python libraries: `memgraph`, `pymgclient`, `lxml`, `markdown`, `pyyaml`
-
-### Logs
+# Implementation notes - Logs
 #### 01/09/2026: DB SETUP + Ingestion Script
 I've ensured to have docker.service up and running, then run the following cmd to start the container from `/DB/docker-compose.yml`:
 ```bash

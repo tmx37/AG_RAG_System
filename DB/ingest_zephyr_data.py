@@ -8,13 +8,16 @@ from typing import List, Dict, Optional
 
 import yaml
 import markdown
-from pymgclient import Connection, exceptions
+from mgclient import Connection
 
 # --- CONFIGURATION ---
 MEMGRAPH_HOST = "localhost"
 MEMGRAPH_PORT = 7687
-ZEPHYR_ROOT = "./zephyr-demo-data"
-DOXYGEN_OUTPUT_DIR = os.path.join(ZEPHYR_ROOT, "doxygen_xml")
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ZEPHYR_ROOT_DIR = os.path.join(SCRIPT_DIR, "zephyr-demo-data")
+DEMO_DOXYGEN_PATH = os.path.join(SCRIPT_DIR, "Doxyfile.demo")
+DOXYGEN_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "doxygen_xml")
 
 # --- MEMGRAPH CONNECTION ---
 def get_connection() -> Connection:
@@ -22,15 +25,31 @@ def get_connection() -> Connection:
         conn = Connection(host=MEMGRAPH_HOST, port=MEMGRAPH_PORT, username="", password="")
         print(f"✅ Connected to Memgraph at {MEMGRAPH_HOST}:{MEMGRAPH_PORT}")
         return conn
-    except exceptions.MemgraphException as e:
+    except Exception as e:
         print(f"❌ Failed to connect to Memgraph: {e}")
         sys.exit(1)
 
 def execute_query(conn: Connection, query: str, params: dict = None):
     try:
-        cursor = conn.execute_and_fetch(query, params)
-        return list(cursor)
-    except exceptions.MemgraphException as e:
+        cursor = conn.cursor()
+        
+        # Replace all '$' values in 'query' with related values in 'params'
+        if params is not None:
+            for value_key in params.keys():
+                query.replace(value_key, params.get(value_key))
+        
+        # Execute query 
+        cursor.execute(query)
+        
+        # Collect output if present
+        output = cursor.fetchall()
+        cursor.close()
+        
+        # Make db changes persistent
+        conn.commit()
+        
+        return list(output)
+    except Exception as e:
         print(f"⚠️ Query error: {e}")
         return []
 
@@ -87,7 +106,7 @@ def generate_doxygen_xml():
 
     print("🛠️ Generating Doxygen XML (this may take a minute)...")
     # Check if doxygen is installed
-    if subprocess.run(["which", "doxygen"], capture_output=True).returncode != 0:
+    if subprocess.run(["doxygen", "--version"], capture_output=True).returncode != 0:
         print("⚠️ Doxygen not found. Skipping XML generation. Install doxygen to enable code graph.")
         return
 
@@ -102,23 +121,26 @@ def generate_doxygen_xml():
     WARNINGS = NO
     """
     # Limit to a small subdir for demo speed (e.g., kernel)
-    target_dir = os.path.join(ZEPHYR_ROOT, "include", "zephyr")
-    
-    with open("Doxyfile.demo", "w") as f:
-        f.write(doxyfile_content)
+    target_dir = os.path.join(SCRIPT_DIR, "zephyr-demo-data", "include", "zephyr")
     
     try:
-        subprocess.run(["doxygen", "Doxyfile.demo"], check=True, cwd=target_dir)
+        with open(DEMO_DOXYGEN_PATH, "w") as f:
+            f.write(doxyfile_content)
+    except Exception as e:
+        print(f"⚠️ Failed to create/open Doxyfile.demo: {e}", e)
+    
+    try:
+        subprocess.run(["doxygen", DEMO_DOXYGEN_PATH], check=True, cwd=target_dir)
         # Move output to expected location
-        generated_xml = os.path.join(target_dir, "xml")
+        generated_xml = os.path.join(SCRIPT_DIR, "xml")
         if os.path.exists(generated_xml):
             os.rename(generated_xml, DOXYGEN_OUTPUT_DIR)
         print("✅ Doxygen XML generated.")
     except Exception as e:
         print(f"⚠️ Doxygen failed: {e}")
     finally:
-        if os.path.exists("Doxyfile.demo"):
-            os.remove("Doxyfile.demo")
+        if os.path.exists(DEMO_DOXYGEN_PATH):
+            os.remove(DEMO_DOXYGEN_PATH)
 
 def ingest_code_graph(conn: Connection):
     print("\n💻 Processing Code Graph (Doxygen XML)...")
