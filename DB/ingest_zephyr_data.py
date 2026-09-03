@@ -4,7 +4,7 @@ import sys
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import yaml
 import markdown
@@ -16,6 +16,7 @@ MEMGRAPH_PORT = 7687
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ZEPHYR_ROOT_DIR = os.path.join(SCRIPT_DIR, "zephyr-demo-data")
+ZEPHYR_ROOT = ZEPHYR_ROOT_DIR
 DEMO_DOXYGEN_PATH = os.path.join(SCRIPT_DIR, "Doxyfile.demo")
 DOXYGEN_OUTPUT_DIR = os.path.join(SCRIPT_DIR, "doxygen_xml")
 
@@ -29,29 +30,36 @@ def get_connection() -> Connection:
         print(f"❌ Failed to connect to Memgraph: {e}")
         sys.exit(1)
 
-def execute_query(conn: Connection, query: str, params: dict = None):
+def execute_query(conn: Connection, query: str, params: Optional[dict] = None):
     try:
         cursor = conn.cursor()
-        
-        # Replace all '$' values in 'query' with related values in 'params'
-        if params is not None:
-            for value_key in params.keys():
-                query.replace(value_key, params.get(value_key))
-        
-        # Execute query 
-        cursor.execute(query)
-        
-        # Collect output if present
-        output = cursor.fetchall()
+
+        # Let the Bolt driver bind parameters; string replacement is unsafe and
+        # also did not modify the query because str.replace returns a new string.
+        cursor.execute(query, params or {})
+        output = cursor.fetchall() if cursor.description is not None else []
         cursor.close()
-        
-        # Make db changes persistent
         conn.commit()
-        
         return list(output)
     except Exception as e:
         print(f"⚠️ Query error: {e}")
         return []
+
+
+def find_values(value, key: str) -> Iterable[str]:
+    """Yield scalar values for a key at any depth in a YAML document."""
+    if isinstance(value, dict):
+        for current_key, current_value in value.items():
+            if current_key == key:
+                values = current_value if isinstance(current_value, list) else [current_value]
+                for item in values:
+                    if isinstance(item, str) and item.strip():
+                        yield item.strip()
+            yield from find_values(current_value, key)
+    elif isinstance(value, list):
+        for item in value:
+            yield from find_values(item, key)
+
 
 # --- 1. PROCESS MARKDOWN/RESTRUCTURED TEXT ---
 def ingest_documents(conn: Connection):
@@ -79,12 +87,8 @@ def ingest_documents(conn: Connection):
 
             # Create Document Node
             query = """
-            CREATE (d:Document {
-                path: $path,
-                title: $title,
-                content: $content,
-                type: 'documentation'
-            })
+            MERGE (d:Document {path: $path})
+            SET d.title = $title, d.content = $content, d.type = 'documentation'
             """
             execute_query(conn, query, {
                 "path": rel_path,
@@ -149,8 +153,8 @@ def ingest_code_graph(conn: Connection):
         print("⚠️ No XML directory found. Run Doxygen first or skip.")
         return
 
-    count_funcs = 0
-    count_calls = 0
+    functions: Set[Tuple[str, str]] = set()
+    calls: Set[Tuple[str, str, str]] = set()
 
     # Parse compounddef (functions/classes)
     for xml_file in xml_dir.rglob("*.xml"):
@@ -158,49 +162,54 @@ def ingest_code_graph(conn: Connection):
             tree = ET.parse(xml_file)
             root = tree.getroot()
             
-            # Find compounddef (function, class, struct)
-            for compound in root.findall(".//compounddef"):
-                kind = compound.get("kind")
-                if kind not in ["function", "member"]:
-                    continue
-
-                name_node = compound.find("name")
+            # Doxygen normally stores C functions as memberdef elements inside
+            # a file/class compounddef, not as compounddef kind="function".
+            definitions = list(root.findall(".//memberdef[@kind='function']"))
+            definitions += [
+                compound for compound in root.findall(".//compounddef")
+                if compound.get("kind") == "function"
+            ]
+            for definition in definitions:
+                kind = definition.get("kind", "function")
+                name_node = definition.find("name")
                 if name_node is None:
                     continue
                 
-                func_name = name_node.text
-                file_node = compound.find("location")
+                func_name = (name_node.text or "").strip()
+                if not func_name:
+                    continue
+                file_node = definition.find("location")
                 file_path = file_node.get("file", "unknown") if file_node is not None else "unknown"
+                functions.add((func_name, file_path))
 
-                # Create Function Node
                 query = """
                 MERGE (f:Function {name: $name, file: $file})
-                ON CREATE SET f.kind = $kind
+                SET f.kind = $kind
                 """
                 execute_query(conn, query, {"name": func_name, "file": file_path, "kind": kind})
-                count_funcs += 1
 
-                # Extract Calls (references to other functions)
-                for ref in compound.findall(".//ref"):
+                for ref in definition.findall(".//references/ref") + definition.findall(".//ref"):
                     if ref.get("kindref") == "function":
-                        called_func = ref.text
+                        called_func = (ref.text or "").strip()
                         if called_func:
-                            call_query = """
-                            MATCH (caller:Function {name: $caller, file: $caller_file})
-                            MATCH (callee:Function {name: $callee})
-                            MERGE (caller)-[:CALLS]->(callee)
-                            """
-                            # Note: This is a simplified match. In prod, use unique IDs.
-                            execute_query(conn, call_query, {
-                                "caller": func_name, 
-                                "caller_file": file_path, 
-                                "callee": called_func
-                            })
-                            count_calls += 1
+                            calls.add((func_name, file_path, called_func))
         except Exception as e:
-            continue # Skip malformed XML
+            print(f"⚠️ Error processing XML {xml_file}: {e}")
 
-    print(f"✅ Ingested {count_funcs} functions and {count_calls} call relationships.")
+    count_calls = 0
+    for caller, caller_file, callee in calls:
+        call_query = """
+        MATCH (caller:Function {name: $caller, file: $caller_file})
+        MATCH (callee:Function {name: $callee})
+        MERGE (caller)-[:CALLS]->(callee)
+        RETURN caller
+        """
+        if execute_query(conn, call_query, {
+            "caller": caller, "caller_file": caller_file, "callee": callee
+        }):
+            count_calls += 1
+
+    print(f"✅ Ingested {len(functions)} functions and {count_calls} call relationships.")
 
 # --- 3. PROCESS DEVICE TREES (.dts) ---
 def ingest_hardware(conn: Connection):
@@ -214,7 +223,7 @@ def ingest_hardware(conn: Connection):
     # Regex to find compatible strings: compatible = "vendor,device";
     compat_pattern = re.compile(r'compatible\s*=\s*"([^"]+)"')
 
-    for dts_file in dts_dir.rglob("*.dtsi"): # .dtsi are the include files with definitions
+    for dts_file in list(dts_dir.rglob("*.dts")) + list(dts_dir.rglob("*.dtsi")):
         try:
             content = dts_file.read_text(encoding='utf-8', errors='ignore')
             matches = compat_pattern.findall(content)
@@ -223,12 +232,12 @@ def ingest_hardware(conn: Connection):
                 # Create Peripheral Node
                 query = """
                 MERGE (p:HardwarePeripheral {compatible: $compat})
-                ON CREATE SET p.source_file = $file
+                SET p.source_file = $file
                 """
                 execute_query(conn, query, {"compat": compat, "file": str(dts_file.relative_to(ZEPHYR_ROOT))})
                 count_peripherals += 1
         except Exception as e:
-            continue
+            print(f"⚠️ Error processing DTS {dts_file}: {e}")
 
     print(f"✅ Ingested {count_peripherals} hardware peripherals.")
 
@@ -261,7 +270,7 @@ def ingest_boards(conn: Connection):
             # Create Board Node
             query = """
             MERGE (b:Board {id: $id})
-            ON CREATE SET b.name = $name, b.path = $path
+            SET b.name = $name, b.path = $path
             """
             execute_query(conn, query, {
                 "id": board_id,
@@ -272,21 +281,74 @@ def ingest_boards(conn: Connection):
 
             # Link Board to Peripherals (Simulated via compatible strings in YAML if present)
             # Real Zephyr YAMLs often list 'soc' or 'arch', we look for 'compatible' if available
-            if "compatible" in data:
-                compatibles = data["compatible"] if isinstance(data["compatible"], list) else [data["compatible"]]
-                for compat in compatibles:
-                    link_query = """
-                    MATCH (b:Board {id: $id})
-                    MATCH (p:HardwarePeripheral {compatible: $compat})
-                    MERGE (b)-[:SUPPORTS]->(p)
-                    """
-                    res = execute_query(conn, link_query, {"id": board_id, "compat": compat})
-                    if res: count_links += 1
+            compatibles = list(find_values(data, "compatible"))
+            for compat in compatibles:
+                link_query = """
+                MATCH (b:Board {id: $id})
+                MATCH (p:HardwarePeripheral {compatible: $compat})
+                MERGE (b)-[:SUPPORTS]->(p)
+                RETURN b
+                """
+                if execute_query(conn, link_query, {"id": board_id, "compat": compat}):
+                    count_links += 1
                     
         except Exception as e:
-            continue
+            print(f"⚠️ Error processing board {yaml_file}: {e}")
 
     print(f"✅ Ingested {count_boards} boards and created {count_links} board-peripheral links.")
+
+
+def link_documents_to_functions(conn: Connection):
+    """Link documentation that explicitly mentions an ingested function name."""
+    query = """
+    MATCH (d:Document), (f:Function)
+    WHERE d.content CONTAINS f.name
+    MERGE (d)-[:DESCRIBES]->(f)
+    RETURN count(*) AS links
+    """
+    result = execute_query(conn, query)
+    links = result[0]["links"] if result else 0
+    print(f"✅ Created {links} document-function links.")
+
+
+def link_functions_to_hardware(conn: Connection):
+    """Link functions to peripherals referenced by Zephyr DT compatibility macros."""
+    function_query = """
+    MATCH (f:Function)
+    RETURN f.name AS name, f.file AS file
+    """
+    peripheral_query = """
+    MATCH (p:HardwarePeripheral)
+    RETURN p.compatible AS compatible
+    """
+    functions = execute_query(conn, function_query)
+    peripherals = execute_query(conn, peripheral_query)
+    links = 0
+    for function in functions:
+        source = Path(function["file"])
+        if not source.is_absolute():
+            source = Path(ZEPHYR_ROOT) / source
+        if not source.is_file():
+            continue
+        content = source.read_text(encoding="utf-8", errors="ignore")
+        for peripheral in peripherals:
+            compatible = peripheral["compatible"]
+            if compatible not in content and compatible.replace(",", "_") not in content:
+                continue
+            link_query = """
+            MATCH (f:Function {name: $name, file: $file})
+            MATCH (p:HardwarePeripheral {compatible: $compatible})
+            MERGE (f)-[:USES]->(p)
+            RETURN f
+            """
+            if execute_query(conn, link_query, {
+                "name": function["name"],
+                "file": function["file"],
+                "compatible": compatible,
+            }):
+                links += 1
+    print(f"✅ Created {links} function-peripheral links.")
+
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
@@ -308,6 +370,10 @@ if __name__ == "__main__":
 
     # Step 4: Boards
     ingest_boards(conn)
+
+    # Step 5: Deterministic links required by the graph schema
+    link_documents_to_functions(conn)
+    link_functions_to_hardware(conn)
 
     # Verification Query
     print("\n🔍 Running Verification Query...")
