@@ -30,7 +30,7 @@ QUESTIONS: list[dict[str, str]] = [
         "query": (
             "MATCH (d:Document) WHERE toLower(d.path) CONTAINS 'bluetooth' "
             "OR toLower(d.title) CONTAINS 'bluetooth' "
-            "RETURN d.path AS path, d.title AS title ORDER BY d.path LIMIT 25"
+            "RETURN d.path AS path, d.title AS title ORDER BY d.path"
         ),
     },
     {
@@ -39,7 +39,7 @@ QUESTIONS: list[dict[str, str]] = [
         "query": (
             "MATCH (f:Function) WHERE toLower(f.file) CONTAINS 'drivers' "
             "RETURN f.name AS name, f.file AS file, f.kind AS kind "
-            "ORDER BY f.file, f.name LIMIT 25"
+            "ORDER BY f.file, f.name"
         ),
     },
     {
@@ -49,7 +49,7 @@ QUESTIONS: list[dict[str, str]] = [
             "MATCH (p:HardwarePeripheral) "
             "WHERE toLower(p.compatible) CONTAINS 'uart' "
             "RETURN p.compatible AS compatible, p.source_file AS source_file "
-            "ORDER BY p.compatible LIMIT 25"
+            "ORDER BY p.compatible"
         ),
     },
     {
@@ -59,7 +59,7 @@ QUESTIONS: list[dict[str, str]] = [
             "MATCH (b:Board) WHERE toLower(b.id) CONTAINS 'nrf' "
             "OR toLower(b.name) CONTAINS 'nrf' "
             "RETURN b.id AS id, b.name AS name, b.path AS path "
-            "ORDER BY b.id LIMIT 25"
+            "ORDER BY b.id"
         ),
     },
     {
@@ -68,7 +68,7 @@ QUESTIONS: list[dict[str, str]] = [
         "query": (
             "MATCH (b:Board)-[:SUPPORTS]->(p:HardwarePeripheral) "
             "RETURN b.id AS board_id, b.name AS board_name, "
-            "p.compatible AS peripheral ORDER BY b.id, p.compatible LIMIT 25"
+            "p.compatible AS peripheral ORDER BY b.id, p.compatible"
         ),
     },
     {
@@ -77,7 +77,7 @@ QUESTIONS: list[dict[str, str]] = [
         "query": (
             "MATCH (f:Function)-[:USES]->(p:HardwarePeripheral) "
             "RETURN f.name AS function, f.file AS file, "
-            "p.compatible AS peripheral ORDER BY f.name, p.compatible LIMIT 25"
+            "p.compatible AS peripheral ORDER BY f.name, p.compatible"
         ),
     },
     {
@@ -87,7 +87,7 @@ QUESTIONS: list[dict[str, str]] = [
             "MATCH (d:Document)-[:DESCRIBES]->(f:Function) "
             "WHERE toLower(f.name) CONTAINS 'printk' "
             "RETURN d.path AS document, f.name AS function, f.file AS file "
-            "ORDER BY d.path, f.name LIMIT 25"
+            "ORDER BY d.path, f.name"
         ),
     },
     {
@@ -97,7 +97,7 @@ QUESTIONS: list[dict[str, str]] = [
             "MATCH (caller:Function)-[:CALLS]->(callee:Function) "
             "RETURN caller.name AS caller, caller.file AS caller_file, "
             "callee.name AS callee, callee.file AS callee_file "
-            "ORDER BY caller.name, callee.name LIMIT 25"
+            "ORDER BY caller.name, callee.name"
         ),
     },
 ]

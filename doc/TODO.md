@@ -1,8 +1,11 @@
+# V1 -> zephyr data used (problem: too much data I don't know)
+# V2 -> use actual business data based on Tested indexing.
+
 # Preparation_1
-- [x] Find valid raw data
+- [ ] Retrive raw data -> Confluence pull, 12 out and all modules used (use Enrico Benso repo)
+- [ ] Find a good model and prompt for serialization -> Make the model find linking methods between the files and use as template the ingestion script made for reference on common methods used (verify how usefull is doxygen)
+- [ ] Create a GraphDB 
 - [ ] Find a clear way to count tokens (for both input and output operations)
-- [ ] Find a good model and prompt for serialization
-- [ ] Create a GraphDB
 
 # Test_1: Fill the GraphDB
 - [ ] Find out how many tokens are required to serialize the nodes from raw data
