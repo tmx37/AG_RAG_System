@@ -36,7 +36,7 @@ def execute_query(conn: Connection, query: str, params: Optional[dict] = None):
 
         # Let the Bolt driver bind parameters; string replacement is unsafe and
         # also did not modify the query because str.replace returns a new string.
-        cursor.execute(query, params or {})
+        cursor.execute(query, params)
         output = cursor.fetchall() if cursor.description is not None else []
         cursor.close()
         conn.commit()
@@ -357,19 +357,19 @@ if __name__ == "__main__":
     conn = get_connection()
 
     # Step 0: Generate XML (Optional)
-    generate_doxygen_xml()
+    # generate_doxygen_xml()
 
     # Step 1: Documents
-    ingest_documents(conn)
+    # ingest_documents(conn)
 
     # Step 2: Code Graph
-    ingest_code_graph(conn)
+    # ingest_code_graph(conn)
 
     # Step 3: Hardware
-    ingest_hardware(conn)
+    # ingest_hardware(conn)
 
     # Step 4: Boards
-    ingest_boards(conn)
+    # ingest_boards(conn)
 
     # Step 5: Deterministic links required by the graph schema
     link_documents_to_functions(conn)
