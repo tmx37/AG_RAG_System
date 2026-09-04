@@ -13,9 +13,10 @@ Remember to enter `.venv` enviroment for python imports.
 ```
 
 **Index**:
-- `./db`........: docker-compose.yml for MemGraphDB container
-- `./doc`.......: documentation folder based on .md
-- `./tools`.....: scripts folder
+- `./DB`.........: docker-compose.yml for MemGraphDB container
+- `./doc`........: documentation folder based on .md 
+- `./agents`.....: agent-related prompts, rules and tools
+- `./logs`.......: dev and agentic logs
 
 ### Requisites
 - Docker
