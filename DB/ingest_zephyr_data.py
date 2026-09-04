@@ -36,6 +36,9 @@ def execute_query(conn: Connection, query: str, params: Optional[dict] = None):
 
         # Let the Bolt driver bind parameters; string replacement is unsafe and
         # also did not modify the query because str.replace returns a new string.
+        if params is None:
+            params = {}
+        
         cursor.execute(query, params)
         output = cursor.fetchall() if cursor.description is not None else []
         cursor.close()
@@ -307,8 +310,7 @@ def link_documents_to_functions(conn: Connection):
     RETURN count(*) AS links
     """
     result = execute_query(conn, query)
-    links = result[0]["links"] if result else 0
-    print(f"✅ Created {links} document-function links.")
+    print(f"✅ Created {result[0]} document-function links.")
 
 
 def link_functions_to_hardware(conn: Connection):
@@ -325,14 +327,14 @@ def link_functions_to_hardware(conn: Connection):
     peripherals = execute_query(conn, peripheral_query)
     links = 0
     for function in functions:
-        source = Path(function["file"])
+        source = Path(function[1])
         if not source.is_absolute():
-            source = Path(ZEPHYR_ROOT) / source
+            source = Path(os.path.join(ZEPHYR_ROOT, "include", "zephyr", function[1])) 
         if not source.is_file():
             continue
         content = source.read_text(encoding="utf-8", errors="ignore")
         for peripheral in peripherals:
-            compatible = peripheral["compatible"]
+            compatible = peripheral[0]
             if compatible not in content and compatible.replace(",", "_") not in content:
                 continue
             link_query = """
@@ -342,8 +344,8 @@ def link_functions_to_hardware(conn: Connection):
             RETURN f
             """
             if execute_query(conn, link_query, {
-                "name": function["name"],
-                "file": function["file"],
+                "name": function[0],
+                "file": function[1],
                 "compatible": compatible,
             }):
                 links += 1
