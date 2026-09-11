@@ -256,6 +256,27 @@ Lo script DEVE:
 3. Fallire con exit code 1 se qualsiasi violazione è rilevata
 4. Flaggaare nel report finale qualsiasi riferimento a URL/risorse esterne trovate nel contenuto dei file
 
+### INVOCATION AND MEMGRAPH INGESTION (MANDATORY)
+After extraction and export validation, execute the generated script without
+`--skip-db` so that its `ingest_memgraph()` method loads the extracted graph
+into the already configured Memgraph instance.
+
+The execution MUST:
+- Use the existing `connect_memgraph()` and `ingest_memgraph()` implementation;
+- Preserve the configured `MEMGRAPH_HOST`, `MEMGRAPH_PORT`, `MEMGRAPH_USERNAME`,
+  and `MEMGRAPH_PASSWORD` runtime settings;
+- Complete the file exports before database ingestion;
+- Fail with a non-zero exit code if the Memgraph connection or any ingestion
+  query fails;
+- Log the ingestion start, completion, and failure status in the level-4
+  operational log;
+- Verify ingestion after completion by querying Memgraph for the number of
+  `Entity` nodes and `RELATED` relationships and recording those counts in the
+  level-4 log.
+
+Do not bypass ingestion by using `--skip-db` for the final execution. That flag
+is only permitted for local extraction/export diagnostics.
+
 ### PRIORITÀ OPERATIVE
 1. Catturare relazioni semantiche non ovvie dal solo AST
 2. Segnalare ambiguità invece di risolverle arbitrariamente

@@ -1,0 +1,11 @@
+2026-09-11 16:03:28,399 INFO Starting structural extraction for 19645 files
+2026-09-11 16:03:45,061 WARNING Syntax error in connectedhomeip/scripts/tests/chiptest/glob_matcher.py: invalid syntax (connectedhomeip/scripts/tests/chiptest/glob_matcher.py, line 1)
+2026-09-11 16:08:26,890 INFO Structural extraction complete: 116409 entities, 178367 relations
+2026-09-11 16:22:04,873 INFO Starting structural extraction for 19645 files
+2026-09-11 16:22:21,580 WARNING Syntax error in connectedhomeip/scripts/tests/chiptest/glob_matcher.py: invalid syntax (connectedhomeip/scripts/tests/chiptest/glob_matcher.py, line 1)
+2026-09-11 16:26:33,432 INFO Structural extraction complete: 116409 entities, 178367 relations
+2026-09-11 16:40:23,458 INFO Starting structural extraction for 19645 files
+2026-09-11 16:40:45,389 WARNING Syntax error in connectedhomeip/scripts/tests/chiptest/glob_matcher.py: invalid syntax (connectedhomeip/scripts/tests/chiptest/glob_matcher.py, line 1)
+2026-09-11 16:45:13,092 INFO Structural extraction complete: 116409 entities, 178367 relations
+2026-09-11 22:43:08,453 INFO Starting structural extraction for 19645 files
+2026-09-11 22:44:32,175 WARNING Syntax error in connectedhomeip/scripts/tests/chiptest/glob_matcher.py: invalid syntax (connectedhomeip/scripts/tests/chiptest/glob_matcher.py, line 1)
