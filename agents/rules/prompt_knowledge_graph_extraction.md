@@ -11,12 +11,13 @@ Priorità: qualità delle relazioni semantiche > struttura del grafo > velocità
 ## INPUT SPECIFICATION
 - Root directory: `/raw_data/` (ricorsivo, tutte le sottocartelle)
 - Reference implementation: `/DB/example_extraction_script.py` (VINCOLANTE per: struttura architetturale, query database, librerie autorizzate, pattern di inserimento)
-- File types: Tutti i file presenti (priorità: codice sorgente + documentazione tecnica)
+- File types: Tutti i file presenti sotto `/raw_data/` (priorità: codice sorgente + documentazione tecnica)
+- Real-data constraint: non esiste alcun file `/DB/example_ingest_data.py` in questo repository; il prompt DEVE basarsi sul file effettivamente presente `/DB/example_extraction_script.py` e sui file locali disponibili in `/raw_data/`
 
 ## OUTPUT SPECIFICATION
 - Script Python: `/output/extraction_script.py` (eseguibile, autonomo)
-- Entities: JSONL o formato definito da `example_ingest_data.py`
-- Relations: JSONL o formato definito da `example_ingest_data.py`
+- Entities: JSONL o formato definito da `/DB/example_extraction_script.py`
+- Relations: JSONL o formato definito da `/DB/example_extraction_script.py`
 - Logs: `/logs/agents/extraction_ops_level_{1-4}.log` (tracciamento flusso estrazione)
 - Access log: `/logs/access_log.jsonl` (tracciamento accessi file)
 - Ambiguities report: `/output/ambiguities.json`
@@ -207,16 +208,17 @@ Genera report `/output/ambiguities.json` per:
 2. **Deduplicazione cross-file**: Entità con nome identico + signature simile = merge con confidence weighting
 3. **Consolidamento relazioni**: Relazioni duplicate con gli stessi endpoint UID e tipo
    = merge con max confidence; relazioni omonime in file diversi NON sono duplicate
-4. **Export finale**: Formato coerente con `example_ingest_data.py`
+4. **Export finale**: Formato coerente con `/DB/example_extraction_script.py`; se il progetto fornisce un format alternativo in output, dovrà essere compatibile con lo schema JSONL già usato dallo script di riferimento
 
-## ISTRUZIONI ARCHITETTURALI (DA example_ingest_data.py)
-**VINCOLANTE**: Analizzare `/DB/example_ingest_data.py` per estrarre:
+## ISTRUZIONI ARCHITETTURALI (DA example_extraction_script.py)
+**VINCOLANTE**: Analizzare `/DB/example_extraction_script.py` per estrarre:
 - Struttura delle classi/funzioni dello script
 - Query database utilizzate (caricamento, inserimento, update)
 - Librerie importate e loro uso specifico
 - Pattern di gestione errori
+- Conformità a una pipeline locale di estrazione e ingestion, senza dipendenze da file esterni o dati non presenti in `/raw_data/`
 
-**Integrazione**: Lo script generato DEVE seguire l'architettura dell'esempio, adattandola al caso d'uso multi-livello descritto.
+**Integrazione**: Lo script generato DEVE seguire l'architettura dell'esempio, adattandola al caso d'uso multi-livello descritto e al repository reale presente in `/raw_data/`.
 
 ## MEMGRAPH INGESTION SPECIFICATION (CRITICAL)
 
