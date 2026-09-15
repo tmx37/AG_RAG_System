@@ -19,7 +19,7 @@ services:
       # Allow connections from any IP (crucial for remote demo access)
       - MEMGRAPH_ARGS=--bolt-address=0.0.0.0 --http-address=0.0.0.0 --storage-snapshot-interval-sec=60
       # Increase memory limit if needed (default is often enough for demos)
-      - MEMGRAPH_MEMORY_LIMIT=4G
+      - MEMGRAPH_MEMORY_LIMIT=8G
     ulimits:
       nofile:
         soft: 65536

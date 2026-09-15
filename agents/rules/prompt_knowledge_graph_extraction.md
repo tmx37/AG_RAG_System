@@ -157,6 +157,15 @@ Lo script DEVE creare indici su Memgraph per abilitare query efficienti:
 ```cypher
 CREATE INDEX ON :Function(name);
 CREATE INDEX ON :Function(file);
+CREATE INDEX ON :Function(uid);
+CREATE INDEX ON :Class(uid);
+CREATE INDEX ON :Module(uid);
+CREATE INDEX ON :Variable(uid);
+CREATE INDEX ON :Type(uid);
+CREATE INDEX ON :Concept(uid);
+CREATE INDEX ON :Requirement(uid);
+CREATE INDEX ON :API(uid);
+CREATE INDEX ON :Document(uid);
 CREATE INDEX ON :Class(name);
 CREATE INDEX ON :Module(path);
 CREATE INDEX ON :Requirement(text);
@@ -196,7 +205,8 @@ Genera report `/output/ambiguities.json` per:
 ## POST-PROCESSING
 1. **Normalizzazione nomi**: lowercase, rimozione prefissi comuni
 2. **Deduplicazione cross-file**: Entità con nome identico + signature simile = merge con confidence weighting
-3. **Consolidamento relazioni**: Relazioni duplicate = merge con max confidence
+3. **Consolidamento relazioni**: Relazioni duplicate con gli stessi endpoint UID e tipo
+   = merge con max confidence; relazioni omonime in file diversi NON sono duplicate
 4. **Export finale**: Formato coerente con `example_ingest_data.py`
 
 ## ISTRUZIONI ARCHITETTURALI (DA example_ingest_data.py)
@@ -213,53 +223,79 @@ Genera report `/output/ambiguities.json` per:
 ### Node Ingestion (Type-Specific Labels)
 ```cypher
 // FUNZIONE - Label specifico, non :Entity generico
-MERGE (n:Function {name: $name, file: $file})
+MERGE (n:Function {uid: $uid})
 SET n.line_start = $line_start, 
     n.line_end = $line_end, 
     n.signature = $signature,
     n.confidence = $confidence
 
 // CLASS - Label specifico
-MERGE (n:Class {name: $name, file: $file})
+MERGE (n:Class {uid: $uid})
 SET n.line_start = $line_start,
     n.extends = $extends,
     n.confidence = $confidence
 
 // DOCUMENT - Label specifico
-MERGE (n:Document {path: $path})
+MERGE (n:Document {uid: $uid, path: $path})
 SET n.title = $title, n.type = $doc_type
 ```
 
 ### Relationship Ingestion (Explicit Types)
 ```cypher
 // CALLS - Tipo esplicito, non :RELATED {predicate: "CALLS"}
-MATCH (caller:Function {name: $caller, file: $caller_file})
-MATCH (callee:Function {name: $callee})
+MATCH (caller:Function {uid: $caller_uid})
+MATCH (callee:Function {uid: $callee_uid})
 MERGE (caller)-[r:CALLS]->(callee)
 SET r.confidence = $confidence, r.line = $line
 
 // CONTAINS - Tipo esplicito
-MATCH (module:Module {path: $file})
-MATCH (func:Function {name: $func_name, file: $file})
+MATCH (module:Module {uid: $module_uid})
+MATCH (func:Function {uid: $func_uid})
 MERGE (module)-[r:CONTAINS]->(func)
 SET r.confidence = 1.0
 
 // DESCRIBES - Cross-link codice-documentazione
-MATCH (doc:Document {path: $doc_path})
-MATCH (func:Function {name: $func_name})
+MATCH (doc:Document {uid: $doc_uid})
+MATCH (func:Function {uid: $func_uid})
 MERGE (doc)-[r:DESCRIBES]->(func)
 SET r.confidence = $confidence, r.rationale = $rationale
 ```
 
+### ENTITY IDENTITY AND RELATIONSHIP SAFETY (MANDATORY)
+Entity names are not globally unique in a multi-file codebase. Every node MUST have a
+deterministic `uid` containing its label and source path (for example
+`Function|src/a.py|process_data`). Use `uid` for all `MERGE` and relationship endpoint
+lookups; never resolve endpoints by `name` alone.
+
+Every exported relation MUST retain source provenance and resolve to exactly one
+source node and one target node. Relationship ingestion MUST:
+
+1. Match by endpoint `uid` (or by `(label, name, file/path)` with a uniqueness check).
+2. Reject and log ambiguous or unresolved endpoints instead of using `LIMIT 1` or
+   creating a Cartesian product.
+3. Never use an untyped `MATCH (a)`/`MATCH (b)` name lookup.
+4. Verify that the number of ingested relationships equals the number of resolvable
+   exported relations; report skipped relations with their reason and source line.
+5. Preserve endpoint labels and source paths in `graph_schema.json`.
+
+Before a normal ingestion run, the script MUST perform a clean-load operation
+(`MATCH (n) DETACH DELETE n`) unless an explicit `--append` option is supplied.
+The clean-load result and the final node/relationship counts MUST be logged.
+
 ### Index Creation (Pre-Ingestion)
 ```cypher
-CREATE INDEX ON :Function(name) IF NOT EXISTS;
-CREATE INDEX ON :Function(file) IF NOT EXISTS;
-CREATE INDEX ON :Class(name) IF NOT EXISTS;
-CREATE INDEX ON :Module(path) IF NOT EXISTS;
-CREATE INDEX ON :Document(path) IF NOT EXISTS;
-CREATE INDEX ON :Requirement(text) IF NOT EXISTS;
+CREATE INDEX ON :Function(name);
+CREATE INDEX ON :Function(file);
+CREATE INDEX ON :Class(name);
+CREATE INDEX ON :Module(path);
+CREATE INDEX ON :Document(path);
+CREATE INDEX ON :Requirement(text);
 ```
+
+Memgraph versions that do not support `IF NOT EXISTS` MUST be handled by executing
+each index DDL statement in its own autocommit transaction and treating only an
+already-existing-index error as non-fatal. Index DDL MUST NOT be issued inside a
+multi-command transaction.
 
 ### Verification Query (Post-Ingestion)
 ```cypher
@@ -325,13 +361,19 @@ Dopo estrazione e validazione export, eseguire lo script generato **senza** `--s
 ```python
 # Dopo ingestion, eseguire query di verifica
 verify_query = """
-RETURN 
-  count(DISTINCT labels(n)) AS unique_labels,
-  count(DISTINCT type(r)) AS unique_relationship_types
+MATCH (n)
+WITH count(DISTINCT labels(n)) AS unique_labels
+MATCH ()-[r]->()
+RETURN unique_labels, count(DISTINCT type(r)) AS unique_relationship_types
 """
 # Se unique_labels < 5, segnalare warning: modello dati non ottimale
 # Se unique_relationship_types < 8, segnalare warning: relazioni troppo generiche
 ```
+
+The verification MUST also compare exported and ingested counts per relationship
+type, detect duplicate `(source_uid, relationship_type, target_uid)` triples, and
+fail with a non-zero exit code when unexpected multiplication or unresolved endpoint
+expansion is detected.
 
 ### PRIORITÀ OPERATIVE
 1. **Modello dati graph-native**: Label tipizzati, relationship type espliciti

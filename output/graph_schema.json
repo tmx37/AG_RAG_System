@@ -1,0 +1,216 @@
+{
+  "node_labels": [
+    {
+      "label": "API",
+      "count": 2053,
+      "required_properties": [
+        "name",
+        "source",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Class",
+      "count": 30904,
+      "required_properties": [
+        "name",
+        "file",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Concept",
+      "count": 12897,
+      "required_properties": [
+        "name",
+        "source",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Document",
+      "count": 4340,
+      "required_properties": [
+        "path",
+        "title"
+      ]
+    },
+    {
+      "label": "Function",
+      "count": 41974,
+      "required_properties": [
+        "name",
+        "file",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Module",
+      "count": 15300,
+      "required_properties": [
+        "name",
+        "path"
+      ]
+    },
+    {
+      "label": "Requirement",
+      "count": 4937,
+      "required_properties": [
+        "text",
+        "source",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Type",
+      "count": 2844,
+      "required_properties": [
+        "name",
+        "file",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Variable",
+      "count": 25387,
+      "required_properties": [
+        "name",
+        "file",
+        "line_start"
+      ]
+    }
+  ],
+  "relationship_types": [
+    {
+      "type": "CALLS",
+      "count": 48890,
+      "start_labels": [
+        "Function",
+        "Module"
+      ],
+      "end_labels": [
+        "Class",
+        "Function"
+      ]
+    },
+    {
+      "type": "CONTAINS",
+      "count": 108258,
+      "start_labels": [
+        "Document",
+        "Module"
+      ],
+      "end_labels": [
+        "Class",
+        "Concept",
+        "Function",
+        "Requirement",
+        "Type",
+        "Variable"
+      ]
+    },
+    {
+      "type": "DEPENDS_ON",
+      "count": 74757,
+      "start_labels": [
+        "Module"
+      ],
+      "end_labels": [
+        "Module"
+      ]
+    },
+    {
+      "type": "DESCRIBES",
+      "count": 2074,
+      "start_labels": [
+        "Document"
+      ],
+      "end_labels": [
+        "API"
+      ]
+    },
+    {
+      "type": "EXTENDS",
+      "count": 3796,
+      "start_labels": [
+        "Class"
+      ],
+      "end_labels": [
+        "Class"
+      ]
+    },
+    {
+      "type": "SATISFIES",
+      "count": 44375,
+      "start_labels": [
+        "Requirement"
+      ],
+      "end_labels": [
+        "Class",
+        "Function"
+      ]
+    }
+  ],
+  "indexes_created": [
+    {
+      "label": "Function",
+      "property": "uid"
+    },
+    {
+      "label": "Class",
+      "property": "uid"
+    },
+    {
+      "label": "Module",
+      "property": "uid"
+    },
+    {
+      "label": "Variable",
+      "property": "uid"
+    },
+    {
+      "label": "Type",
+      "property": "uid"
+    },
+    {
+      "label": "Concept",
+      "property": "uid"
+    },
+    {
+      "label": "Requirement",
+      "property": "uid"
+    },
+    {
+      "label": "API",
+      "property": "uid"
+    },
+    {
+      "label": "Document",
+      "property": "uid"
+    },
+    {
+      "label": "Function",
+      "property": "name"
+    },
+    {
+      "label": "Function",
+      "property": "file"
+    },
+    {
+      "label": "Class",
+      "property": "name"
+    },
+    {
+      "label": "Module",
+      "property": "path"
+    },
+    {
+      "label": "Document",
+      "property": "path"
+    },
+    {
+      "label": "Requirement",
+      "property": "text"
+    }
+  ]
+}

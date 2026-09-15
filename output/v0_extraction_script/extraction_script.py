@@ -261,7 +261,7 @@ def extract_generic_code(path: Path, text: str, extraction: Extraction) -> None:
 
 def extract_document(path: Path, text: str, extraction: Extraction) -> None:
     source = rel_path(path)
-    document = extraction.add_entity(Entity(path.name, "Module", source, 1, max(1, text.count("\n") + 1),
+    document = extraction.add_entity(Entity(path.name, "Document", source, 1, max(1, text.count("\n") + 1),
                                             "Documentation document", 0.95, {"document": True}))
     extraction.doc_entities[source].append(document)
     for match in re.finditer(r"(?m)^(#{1,6})\s+(.+?)\s*$", text):
@@ -428,6 +428,41 @@ def export_results(extraction: Extraction, metrics: dict[str, Any]) -> None:
         "ambiguities": extraction.ambiguities,
     }
     (OUTPUT_DIR / "ambiguities.json").write_text(json.dumps(report, indent=2, ensure_ascii=True), encoding="utf-8")
+    node_counts = Counter(entity.entity_type for entity in extraction.entities.values())
+    relation_counts = Counter(relation.predicate for relation in extraction.relations.values())
+    required = {
+        "Function": ["name", "file", "line_start"],
+        "Class": ["name", "file", "line_start"],
+        "Module": ["name", "path"],
+        "Variable": ["name", "file", "line_start"],
+        "Type": ["name", "file", "line_start"],
+        "Concept": ["name", "source", "line_start"],
+        "Requirement": ["text", "source", "line_start"],
+        "API": ["name", "source", "line_start"],
+        "Document": ["path", "title"],
+    }
+    schema = {
+        "node_labels": [
+            {"label": label, "count": node_counts.get(label, 0),
+             "required_properties": required.get(label, ["name"])}
+            for label in sorted(node_counts)
+        ],
+        "relationship_types": [
+            {"type": relation_type, "count": count,
+             "start_labels": [], "end_labels": []}
+            for relation_type, count in sorted(relation_counts.items())
+        ],
+        "indexes_created": [
+            {"label": label, "property": property_name}
+            for label, property_name in (
+                ("Function", "name"), ("Function", "file"), ("Class", "name"),
+                ("Module", "path"), ("Document", "path"), ("Requirement", "text"),
+            )
+        ],
+    }
+    (OUTPUT_DIR / "graph_schema.json").write_text(
+        json.dumps(schema, indent=2, ensure_ascii=True), encoding="utf-8"
+    )
 
 
 def connect_memgraph() -> Any:
@@ -450,53 +485,72 @@ def ingest_memgraph(extraction: Extraction) -> None:
     conn = connect_memgraph()
     try:
         cursor = conn.cursor()
+        labels = {"Function", "Class", "Module", "Variable", "Type", "Concept",
+                  "Requirement", "API", "Document"}
+        for label, property_name in (
+            ("Function", "name"), ("Function", "file"), ("Class", "name"),
+            ("Module", "path"), ("Document", "path"), ("Requirement", "text"),
+        ):
+            cursor.execute(f"CREATE INDEX ON :{label}({property_name}) IF NOT EXISTS")
+        conn.commit()
         batch_size = 1000
-        entity_query = (
-            "UNWIND $rows AS row "
-            "MERGE (n:Entity {name: row.name, type: row.type, file: row.file}) "
-            "SET n.line_start=row.line, n.line_end=row.line_end, "
-            "n.description=row.description, n.confidence=row.confidence"
-        )
         entities = list(extraction.entities.values())
-        for start in range(0, len(entities), batch_size):
+        for label in sorted(labels):
+            label_entities = [entity for entity in entities if entity.entity_type == label]
+            if not label_entities:
+                continue
             rows = [{
-                "name": entity.name, "type": entity.entity_type, "file": entity.source_file,
-                "line": entity.line_start, "line_end": entity.line_end,
+                "key": (entity.description if label == "Requirement"
+                        else entity.source_file if label in {"Module", "Document"} else entity.name),
+                "name": entity.name, "file": entity.source_file,
+                "line_start": entity.line_start, "line_end": entity.line_end,
                 "description": entity.description, "confidence": entity.confidence,
-            } for entity in entities[start:start + batch_size]]
-            cursor.execute(entity_query, {"rows": rows})
-            conn.commit()
-            logger.info("Memgraph entities ingested: %d/%d", min(start + batch_size, len(entities)), len(entities))
+            } for entity in label_entities]
+            key = ("text" if label == "Requirement"
+                   else "path" if label in {"Module", "Document"} else "name")
+            query = (
+                f"UNWIND $rows AS row MERGE (n:{label} {{{key}: row.key}}) "
+                "SET n.name=row.name, n.text=row.key, n.title=row.name, n.path=row.key, "
+                "n.file=row.file, n.line_start=row.line_start, "
+                "n.line_end=row.line_end, n.description=row.description, n.confidence=row.confidence"
+            )
+            for start in range(0, len(rows), batch_size):
+                cursor.execute(query, {"rows": rows[start:start + batch_size]})
+                conn.commit()
 
-        relation_query = (
-            "UNWIND $rows AS row "
-            "CALL { WITH row MATCH (a:Entity {name: row.subject}) RETURN a LIMIT 1 } "
-            "CALL { WITH row MATCH (b:Entity {name: row.object}) RETURN b LIMIT 1 } "
-            "MERGE (a)-[r:RELATED {predicate: row.predicate}]->(b) "
-            "SET r.confidence=row.confidence, r.file=row.file, "
-            "r.line=row.line, r.rationale=row.rationale"
-        )
         relations = list(extraction.relations.values())
-        relation_batch_size = batch_size
-        for start in range(0, len(relations), relation_batch_size):
+        for relation_type in sorted({relation.predicate for relation in relations}):
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]*", relation_type):
+                raise RuntimeError(f"Invalid relationship type: {relation_type}")
             rows = [{
                 "subject": relation.subject, "object": relation.object,
-                "predicate": relation.predicate, "confidence": relation.confidence,
-                "file": relation.source_file, "line": relation.line,
-                "rationale": relation.rationale,
-            } for relation in relations[start:start + batch_size]]
-            cursor.execute(relation_query, {"rows": rows})
-            conn.commit()
-            logger.info("Memgraph relations ingested: %d/%d",
-                        min(start + relation_batch_size, len(relations)), len(relations))
+                "confidence": relation.confidence, "file": relation.source_file,
+                "line": relation.line, "rationale": relation.rationale,
+            } for relation in relations if relation.predicate == relation_type]
+            query = (
+                f"UNWIND $rows AS row MATCH (a) WHERE a.name=row.subject "
+                f"MATCH (b) WHERE b.name=row.object MERGE (a)-[r:{relation_type}]->(b) "
+                "SET r.confidence=row.confidence, r.file=row.file, r.line=row.line, "
+                "r.rationale=row.rationale"
+            )
+            for start in range(0, len(rows), batch_size):
+                cursor.execute(query, {"rows": rows[start:start + batch_size]})
+                conn.commit()
 
-        cursor.execute("MATCH (n:Entity) RETURN count(n)")
-        entity_count = cursor.fetchone()[0]
-        cursor.execute("MATCH ()-[r:RELATED]->() RETURN count(r)")
+        cursor.execute("MATCH (n) RETURN count(n)")
+        node_count = cursor.fetchone()[0]
+        cursor.execute("MATCH ()-[r]->() RETURN count(r)")
         relation_count = cursor.fetchone()[0]
-        conn.commit()
-        logger.info("Memgraph ingestion complete: %d Entity nodes, %d RELATED relationships",
-                    entity_count, relation_count)
+        cursor.execute("MATCH (n) RETURN count(DISTINCT labels(n))")
+        unique_labels = cursor.fetchone()[0]
+        cursor.execute("MATCH ()-[r]->() RETURN count(DISTINCT type(r))")
+        unique_relationship_types = cursor.fetchone()[0]
+        if unique_labels < 5:
+            logger.warning("Graph model has fewer than 5 node labels: %s", unique_labels)
+        if unique_relationship_types < 8:
+            logger.warning("Graph model has fewer than 8 relationship types: %s", unique_relationship_types)
+        logger.info("Memgraph ingestion complete: %d nodes, %d relationships, %d labels, %d relationship types",
+                    node_count, relation_count, unique_labels, unique_relationship_types)
     except Exception:
         logger.exception("Memgraph ingestion failed")
         raise
