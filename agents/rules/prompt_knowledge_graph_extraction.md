@@ -10,7 +10,7 @@ Priorità: qualità delle relazioni semantiche > struttura del grafo > velocità
 
 ## INPUT SPECIFICATION
 - Root directory: `/raw_data/` (ricorsivo, tutte le sottocartelle)
-- Reference implementation: `/DB/example_ingest_data.py` (VINCOLANTE per: struttura architetturale, query database, librerie autorizzate, pattern di inserimento)
+- Reference implementation: `/DB/example_extraction_script.py` (VINCOLANTE per: struttura architetturale, query database, librerie autorizzate, pattern di inserimento)
 - File types: Tutti i file presenti (priorità: codice sorgente + documentazione tecnica)
 
 ## OUTPUT SPECIFICATION
