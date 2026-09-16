@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import gc
+import hashlib
 import json
 import logging
 import os
@@ -47,6 +48,10 @@ class Entity:
     description: str = ""
     confidence: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)
+    source_text: str = ""
+    signature: str = ""
+    return_type: str = ""
+    parameters: list[str] = field(default_factory=list)
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -69,12 +74,23 @@ class Relation:
         return (self.subject, self.predicate, self.object, self.source_file)
 
 
+@dataclass
+class SourceChunk:
+    uid: str
+    source_file: str
+    line_start: int
+    line_end: int
+    content: str
+    chunk_type: str = "file"
+
+
 class Extraction:
     def __init__(self) -> None:
         self.entities: dict[tuple[str, str, str], Entity] = {}
         self.relations: dict[tuple[str, str, str], Relation] = {}
         self.ambiguities: list[dict[str, Any]] = []
         self.file_contents: dict[str, str] = {}
+        self.source_chunks: dict[str, SourceChunk] = {}
         self.doc_entities: dict[str, list[Entity]] = defaultdict(list)
         self.code_entities: dict[str, list[Entity]] = defaultdict(list)
         self.loggers = setup_logging()
@@ -139,11 +155,13 @@ def read_text(path: Path, extraction: Extraction) -> Optional[str]:
     except OSError as exc:
         extraction.loggers["structural"].warning("Unreadable file %s: %s", resolved, exc)
         return None
+    if b"\x00" in data:
+        extraction.loggers["structural"].info("Skipping binary content: %s", resolved)
+        return None
     for encoding in ("utf-8", "utf-8-sig", "latin-1"):
         try:
             text = data.decode(encoding)
-            if resolved.suffix.lower() in DOC_EXTENSIONS | CONFIG_EXTENSIONS:
-                extraction.file_contents[str(resolved.relative_to(RAW_DATA_DIR))] = text
+            extraction.file_contents[str(resolved.relative_to(RAW_DATA_DIR))] = text
             return text
         except UnicodeDecodeError:
             continue
@@ -167,6 +185,45 @@ def add_file_entity(extraction: Extraction, path: Path, kind: str = "Module") ->
     return entity
 
 
+def source_chunk_uid(source_file: str, line_start: int, line_end: int, content: str) -> str:
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    return f"SourceChunk|{source_file}|{line_start}-{line_end}|{digest}"
+
+
+def add_source_chunks(extraction: Extraction, source_file: str, text: str, chunk_lines: int = 200) -> None:
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        lines = [""]
+    for start in range(0, len(lines), chunk_lines):
+        end = min(start + chunk_lines, len(lines))
+        content = "".join(lines[start:end])
+        chunk = SourceChunk(
+            source_chunk_uid(source_file, start + 1, end, content),
+            source_file,
+            start + 1,
+            end,
+            content,
+        )
+        extraction.source_chunks[chunk.uid] = chunk
+
+
+def chunk_uid_for_line(extraction: Extraction, source_file: str, line: int) -> str:
+    return next(
+        (chunk.uid for chunk in extraction.source_chunks.values()
+         if chunk.source_file == source_file and chunk.line_start <= line <= chunk.line_end),
+        "",
+    )
+
+
+def source_segment(text: str, node: ast.AST) -> str:
+    return ast.get_source_segment(text, node) or ""
+
+
+def python_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    arguments = ast.unparse(node.args)
+    return f"def {node.name}({arguments})"
+
+
 def extract_python(path: Path, text: str, extraction: Extraction) -> None:
     source = rel_path(path)
     try:
@@ -182,10 +239,15 @@ def extract_python(path: Path, text: str, extraction: Extraction) -> None:
     scopes: list[Entity] = [module]
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            line_end = getattr(node, "end_lineno", node.lineno)
             entity = extraction.add_entity(Entity(
                 node.name, "Function", source, node.lineno,
-                getattr(node, "end_lineno", node.lineno), ast.get_docstring(node) or "",
+                line_end, ast.get_docstring(node) or "",
                 0.95, {"language": "python"},
+                source_segment(text, node), python_signature(node),
+                ast.unparse(node.returns) if node.returns else "",
+                [arg.arg for arg in (*node.args.posonlyargs, *node.args.args,
+                                      *node.args.kwonlyargs)],
             ))
             extraction.code_entities[source].append(entity)
             parent = next((item for item in scopes if item.line_start <= node.lineno <= item.line_end), module)
@@ -197,10 +259,12 @@ def extract_python(path: Path, text: str, extraction: Extraction) -> None:
                 extraction.add_relation(Relation(entity.name, "CALLS", called, 0.85, source, node.lineno,
                                                   "Direct call expression"))
         elif isinstance(node, ast.ClassDef):
+            line_end = getattr(node, "end_lineno", node.lineno)
             entity = extraction.add_entity(Entity(
                 node.name, "Class", source, node.lineno,
-                getattr(node, "end_lineno", node.lineno), ast.get_docstring(node) or "",
+                line_end, ast.get_docstring(node) or "",
                 0.95, {"language": "python"},
+                source_segment(text, node),
             ))
             extraction.code_entities[source].append(entity)
             extraction.add_relation(Relation(module.name, "CONTAINS", entity.name, 0.95, source, node.lineno,
@@ -236,15 +300,44 @@ def extract_generic_code(path: Path, text: str, extraction: Extraction) -> None:
     patterns = [
         ("Class", re.compile(r"\b(?:class|struct|interface)\s+([A-Za-z_]\w*)")),
         ("Type", re.compile(r"\b(?:typedef|enum|union)\s+(?:class\s+)?([A-Za-z_]\w*)")),
-        ("Function", re.compile(r"(?m)^\s*(?:[\w:<>*&]+\s+)+([A-Za-z_]\w*)\s*\([^;\n]*\)\s*(?:\{|$)")),
+        ("Function", re.compile(
+            r"(?m)^[ \t]*([\w:<>*& ]+?)([A-Za-z_]\w*)[ \t]*"
+            r"\(([^;\n{}]*)\)[ \t\r]*(?:\{|$)"
+        )),
         ("Function", re.compile(r"\b(?:function|func)\s+([A-Za-z_]\w*)\s*\(")),
     ]
     for entity_type, pattern in patterns:
         for match in pattern.finditer(text):
-            name = match.group(1)
+            is_c_style_function = entity_type == "Function" and match.lastindex == 3
+            name = match.group(2) if is_c_style_function else match.group(1)
             line = line_number(text, match.start())
-            entity = extraction.add_entity(Entity(name, entity_type, source, line, line, "",
-                                                   0.9, {"language": path.suffix}))
+            declaration = match.group(0).strip()
+            end_offset = match.end()
+            if entity_type == "Function" and "{" in text[end_offset:end_offset + 2]:
+                depth = 0
+                cursor = text.find("{", end_offset)
+                while cursor >= 0 and cursor < len(text):
+                    if text[cursor] == "{":
+                        depth += 1
+                    elif text[cursor] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end_offset = cursor + 1
+                            break
+                    cursor += 1
+            line_end = line_number(text, end_offset - 1)
+            parameters = []
+            if entity_type == "Function":
+                parameter_text = match.group(3) if is_c_style_function else ""
+                parameters = [item.strip() for item in parameter_text.split(",") if item.strip()]
+            entity = extraction.add_entity(Entity(
+                name, entity_type, source, line, line_end, "",
+                0.9, {"language": path.suffix},
+                text[match.start():end_offset].strip() if entity_type == "Function" else "",
+                declaration if entity_type == "Function" else "",
+                match.group(1).strip() if is_c_style_function else "",
+                parameters,
+            ))
             extraction.code_entities[source].append(entity)
             extraction.add_relation(Relation(module.name, "CONTAINS", name, 0.9, source, line,
                                               "Declaration pattern"))
@@ -284,6 +377,8 @@ def extract_document(path: Path, text: str, extraction: Extraction) -> None:
                                           "Requirement language in documentation"))
     for match in re.finditer(r"(?i)\b(?:api|endpoint|interface|function)\s*[:`]*\s*([A-Za-z_]\w*)", text):
         name = match.group(1)
+        if name == "_" or len(name) < 2:
+            continue
         line = line_number(text, match.start())
         api = extraction.add_entity(Entity(name, "API", source, line, line, match.group(0), 0.75))
         extraction.doc_entities[source].append(api)
@@ -300,10 +395,16 @@ def level_one(extraction: Extraction, files: list[Path]) -> None:
         text = read_text(path, extraction)
         if text is None:
             continue
+        add_source_chunks(extraction, rel_path(path), text)
         if path.suffix.lower() == ".py":
             extract_python(path, text, extraction)
         elif path.suffix.lower() in CODE_EXTENSIONS:
             extract_generic_code(path, text, extraction)
+        for entity in extraction.code_entities.get(rel_path(path), []):
+            entity.metadata.setdefault(
+                "source_chunk_uid",
+                chunk_uid_for_line(extraction, rel_path(path), entity.line_start),
+            )
         if index % 128 == 0:
             gc.collect()
     logger.info("Structural extraction complete: %d entities, %d relations",
@@ -424,9 +525,13 @@ def export_results(extraction: Extraction, metrics: dict[str, Any]) -> None:
     with (OUTPUT_DIR / "relations.jsonl").open("w", encoding="utf-8") as handle:
         for relation in sorted(extraction.relations.values(), key=lambda item: item.key):
             handle.write(json.dumps(asdict(relation), ensure_ascii=True) + "\n")
+    with (OUTPUT_DIR / "source_chunks.jsonl").open("w", encoding="utf-8") as handle:
+        for chunk in sorted(extraction.source_chunks.values(), key=lambda item: item.uid):
+            handle.write(json.dumps(asdict(chunk), ensure_ascii=True) + "\n")
     report = {
         "generated_at": now(),
         "metrics": metrics,
+        "source_chunks": len(extraction.source_chunks),
         "ambiguities": extraction.ambiguities,
     }
     (OUTPUT_DIR / "ambiguities.json").write_text(json.dumps(report, indent=2, ensure_ascii=True), encoding="utf-8")
@@ -442,6 +547,7 @@ def export_results(extraction: Extraction, metrics: dict[str, Any]) -> None:
         "Requirement": ["text", "source", "line_start"],
         "API": ["name", "source", "line_start"],
         "Document": ["path", "title"],
+        "SourceChunk": ["uid", "source_file", "line_start", "line_end", "content"],
     }
     resolved_relations, _ = resolve_relation_endpoints(extraction)
     labels_by_relation: dict[str, tuple[set[str], set[str]]] = defaultdict(lambda: (set(), set()))
@@ -469,9 +575,21 @@ def export_results(extraction: Extraction, metrics: dict[str, Any]) -> None:
                 ("Requirement", "uid"), ("API", "uid"), ("Document", "uid"),
                 ("Function", "name"), ("Function", "file"), ("Class", "name"),
                 ("Module", "path"), ("Document", "path"), ("Requirement", "text"),
+                ("SourceChunk", "uid"), ("SourceChunk", "source_file"),
             )
         ],
     }
+    schema["relationship_types"].append({
+        "type": "HAS_CHUNK",
+        "count": len(extraction.source_chunks),
+        "start_labels": ["Module"],
+        "end_labels": ["SourceChunk"],
+    })
+    schema["node_labels"].append({
+        "label": "SourceChunk",
+        "count": len(extraction.source_chunks),
+        "required_properties": required["SourceChunk"],
+    })
     (OUTPUT_DIR / "graph_schema.json").write_text(
         json.dumps(schema, indent=2, ensure_ascii=True), encoding="utf-8"
     )
@@ -543,6 +661,17 @@ def resolve_relation_endpoints(extraction: Extraction) -> tuple[list[dict[str, A
             "confidence": relation.confidence, "file": relation.source_file,
             "line": relation.line, "rationale": relation.rationale,
         }
+        source_text = extraction.file_contents.get(relation.source_file, "")
+        if source_text and relation.line:
+            lines = source_text.splitlines()
+            evidence = lines[relation.line - 1] if relation.line <= len(lines) else ""
+            row["evidence_text"] = evidence
+            row["evidence_chunk_uid"] = next(
+                (chunk.uid for chunk in extraction.source_chunks.values()
+                 if chunk.source_file == relation.source_file
+                 and chunk.line_start <= relation.line <= chunk.line_end),
+                "",
+            )
         key = (row["subject_uid"], row["predicate"], row["object_uid"])
         current = resolved.get(key)
         if current is None or row["confidence"] > current["confidence"]:
@@ -562,13 +691,14 @@ def ingest_memgraph(extraction: Extraction, append: bool = False) -> None:
             conn.commit()
             logger.info("Cleared existing Memgraph graph before ingestion")
         labels = {"Function", "Class", "Module", "Variable", "Type", "Concept",
-                  "Requirement", "API", "Document"}
+                  "Requirement", "API", "Document", "SourceChunk"}
         index_specs = (
             ("Function", "uid"), ("Class", "uid"), ("Module", "uid"),
             ("Variable", "uid"), ("Type", "uid"), ("Concept", "uid"),
             ("Requirement", "uid"), ("API", "uid"), ("Document", "uid"),
             ("Function", "name"), ("Function", "file"), ("Class", "name"),
             ("Module", "path"), ("Document", "path"), ("Requirement", "text"),
+            ("SourceChunk", "uid"), ("SourceChunk", "source_file"),
         )
         for label, property_name in index_specs:
             try:
@@ -590,23 +720,46 @@ def ingest_memgraph(extraction: Extraction, append: bool = False) -> None:
                 continue
             rows = [{
                 "uid": entity_uid(entity),
-                "key": (entity.name if label == "Requirement"
-                        else entity.source_file if label in {"Module", "Document"} else entity.name),
                 "name": entity.name, "file": entity.source_file,
                 "line_start": entity.line_start, "line_end": entity.line_end,
                 "description": entity.description, "confidence": entity.confidence,
+                "text": entity.source_text or entity.description or entity.name,
+                "path": entity.source_file if label in {"Module", "Document"} else entity.source_file,
+                "source_text": entity.source_text, "signature": entity.signature,
+                "return_type": entity.return_type,
+                "parameters": json.dumps(entity.parameters, ensure_ascii=True),
             } for entity in label_entities]
-            key = ("text" if label == "Requirement"
-                   else "path" if label in {"Module", "Document"} else "name")
             query = (
                 f"UNWIND $rows AS row MERGE (n:{label} {{uid: row.uid}}) "
-                "SET n.name=row.name, n.text=row.key, n.title=row.name, n.path=row.key, "
+                "SET n.name=row.name, n.text=row.text, n.title=row.name, n.path=row.path, "
                 "n.file=row.file, n.line_start=row.line_start, "
-                "n.line_end=row.line_end, n.description=row.description, n.confidence=row.confidence"
+                "n.line_end=row.line_end, n.description=row.description, "
+                "n.confidence=row.confidence, n.source_text=row.source_text, "
+                "n.signature=row.signature, n.return_type=row.return_type, "
+                "n.parameters=row.parameters"
             )
             for start in range(0, len(rows), batch_size):
                 cursor.execute(query, {"rows": rows[start:start + batch_size]})
                 conn.commit()
+
+        chunk_rows = [asdict(chunk) for chunk in extraction.source_chunks.values()]
+        chunk_query = (
+            "UNWIND $rows AS row MERGE (n:SourceChunk {uid: row.uid}) "
+            "SET n.source_file=row.source_file, n.line_start=row.line_start, "
+            "n.line_end=row.line_end, n.content=row.content, n.chunk_type=row.chunk_type"
+        )
+        for start in range(0, len(chunk_rows), batch_size):
+            cursor.execute(chunk_query, {"rows": chunk_rows[start:start + batch_size]})
+            conn.commit()
+        for start in range(0, len(chunk_rows), batch_size):
+            cursor.execute(
+                "UNWIND $rows AS row "
+                "MATCH (f:Module {path: row.source_file}) "
+                "MATCH (c:SourceChunk {uid: row.uid}) "
+                "MERGE (f)-[:HAS_CHUNK]->(c)",
+                {"rows": chunk_rows[start:start + batch_size]},
+            )
+            conn.commit()
 
         resolved_relations, skipped = resolve_relation_endpoints(extraction)
         if skipped:
@@ -625,7 +778,8 @@ def ingest_memgraph(extraction: Extraction, append: bool = False) -> None:
                 f"MATCH (b) WHERE b.uid=row.object_uid "
                 f"MERGE (a)-[r:{relation_type}]->(b) "
                 "SET r.confidence=row.confidence, r.file=row.file, r.line=row.line, "
-                "r.rationale=row.rationale"
+                "r.rationale=row.rationale, r.evidence_text=row.evidence_text, "
+                "r.evidence_chunk_uid=row.evidence_chunk_uid"
             )
             for start in range(0, len(rows), batch_size):
                 cursor.execute(query, {"rows": rows[start:start + batch_size]})
@@ -645,7 +799,7 @@ def ingest_memgraph(extraction: Extraction, append: bool = False) -> None:
             logger.warning("Graph model has fewer than 8 relationship types: %s", unique_relationship_types)
         logger.info("Memgraph ingestion complete: %d nodes, %d relationships, %d labels, %d relationship types",
                     node_count, relation_count, unique_labels, unique_relationship_types)
-        expected = len(resolved_relations)
+        expected = len(resolved_relations) + len(chunk_rows)
         if relation_count != expected:
             raise RuntimeError(f"Relationship count mismatch: expected {expected}, got {relation_count}")
     except Exception:
@@ -665,6 +819,12 @@ def load_exported_extraction() -> Extraction:
         for line in handle:
             relation = Relation(**json.loads(line))
             extraction.relations[relation.key] = relation
+    chunks_path = OUTPUT_DIR / "source_chunks.jsonl"
+    if chunks_path.is_file():
+        with chunks_path.open(encoding="utf-8") as handle:
+            for line in handle:
+                chunk = SourceChunk(**json.loads(line))
+                extraction.source_chunks[chunk.uid] = chunk
     return extraction
 
 
