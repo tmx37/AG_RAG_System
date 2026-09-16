@@ -295,6 +295,8 @@ def level_one(extraction: Extraction, files: list[Path]) -> None:
     logger = extraction.loggers["structural"]
     logger.info("Starting structural extraction for %d files", len(files))
     for index, path in enumerate(files, 1):
+        # Keep every in-scope file represented, including unsupported/binary files.
+        add_file_entity(extraction, path)
         text = read_text(path, extraction)
         if text is None:
             continue
@@ -687,15 +689,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     files = sorted(path for path in RAW_DATA_DIR.rglob("*") if path.is_file())
     for path in files:
         checked_path(path)
-    processable = [
-        path for path in files
-        if path.suffix.lower() in CODE_EXTENSIONS
-        or path.suffix.lower() in DOC_EXTENSIONS
-        or path.suffix.lower() in CONFIG_EXTENSIONS
-        or path.name.upper() in {"README", "LICENSE", "NOTICE", "AGENTS", "CLAUDE", "GEMINI"}
-    ]
-    level_one(extraction, processable)
-    level_two(extraction, processable)
+    level_one(extraction, files)
+    level_two(extraction, files)
     level_three(extraction)
     metrics = level_four(extraction)
     detect_ambiguities(extraction)
