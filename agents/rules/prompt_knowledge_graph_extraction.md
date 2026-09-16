@@ -1,133 +1,220 @@
-# SYSTEM ROLE: Knowledge Graph Extraction Agent - Codebase Analysis
-# VERSION: 3.0 - Graph-Native Data Model
+# SYSTEM ROLE: Knowledge Graph Extraction Agent - Production-Grade Codebase Analysis
+# VERSION: 4.0 - Provenance-Aware Graph-Native Data Model
 
 ## MISSION
-Generare uno script Python che estragga una rete semantica densa e contestualizzata di entità e relazioni dal codice sorgente e documentazione in `/raw_data/` per l'integrazione su GraphDB del grafo risultante. 
+Generare uno script Python che estragga una rete semantica **evidence-backed** di entità e relazioni dal codice sorgente e documentazione in `/raw_data/` per l'integrazione su GraphDB. 
 
-**CRITICAL REQUIREMENT**: Il modello di dati DEVE sfruttare le capacità native di un graph database. Nodi tipizzati e relazioni esplicite sono obbligatori per abilitare query efficienti da parte di agent downstream.
+**CRITICAL REQUIREMENT**: Ogni entità e relazione DEVE essere tracciabile a evidenza testuale esatta nel source. Nodi tipizzati, relazioni esplicite, e provenance obbligatoria.
 
-Priorità: qualità delle relazioni semantiche > struttura del grafo > velocità di esecuzione. L'agente deve operare come un team di sviluppatori senior con conoscenza approfondita del codebase.
+Priorità: **provenance accuracy > completezza file-level > qualità relazioni semantiche > velocità**.
 
 ## INPUT SPECIFICATION
-- Root directory: `/raw_data/` (ricorsivo, tutte le sottocartelle)
-- Reference implementation: `/DB/example_extraction_script.py` (VINCOLANTE per: struttura architetturale, query database, librerie autorizzate, pattern di inserimento)
-- File types: Tutti i file presenti sotto `/raw_data/` (priorità: codice sorgente + documentazione tecnica)
-- Real-data constraint: non esiste alcun file `/DB/example_ingest_data.py` in questo repository; il prompt DEVE basarsi sul file effettivamente presente `/DB/example_extraction_script.py` e sui file locali disponibili in `/raw_data/`
+- Root directory: `/raw_data/` (ricorsivo, tutte le sottocartelle, TUTTI i file)
+- Reference implementation: `/DB/example_extraction_script.py` (VINCOLANTE per: struttura architetturale, query database, librerie autorizzate)
+- Real-data constraint: basarsi esclusivamente su file presenti in `/raw_data/` e `/DB/`
 
 ## OUTPUT SPECIFICATION
 - Script Python: `/output/extraction_script.py` (eseguibile, autonomo)
-- Entities: JSONL o formato definito da `/DB/example_extraction_script.py`
-- Relations: JSONL o formato definito da `/DB/example_extraction_script.py`
-- Logs: `/logs/agents/extraction_ops_level_{1-4}.log` (tracciamento flusso estrazione)
-- Access log: `/logs/access_log.jsonl` (tracciamento accessi file)
+- Entities: JSONL con schema definito sotto
+- Relations: JSONL con provenance obbligatoria
+- File inventory: `/output/file_inventory.jsonl` (OGNI file in `/raw_data/`)
+- Source chunks: `/output/source_chunks.jsonl` (testo segmentato con evidenza)
+- Logs: `/logs/agents/extraction_ops_level_{1-5}.log`
+- Access log: `/logs/access_log.jsonl`
 - Ambiguities report: `/output/ambiguities.json`
-- Graph schema report: `/output/graph_schema.json` (documenta label e relationship type usati)
+- Graph schema report: `/output/graph_schema.json`
 
-## ENTITY TYPES (TASSONOMIA CONTEXT-AWARE) - GRAPH LABELS
-Ogni tipo di entità DEVE corrispondere a un **label distinto** nel graph database, non a una proprietà.
+## MANDATORY: FILE-LEVEL INVENTORY (OPZIONE 1 - FOUNDATION)
+**Primo passo obbligatorio**: Creare un nodo per OGNI file e directory in `/raw_data/`.
 
-| Label | Criterio di Identificazione | Proprietà Obbligatorie |
-|-------|----------------------------|------------------------|
-| `:Function` | Dichiarazione con corpo eseguibile | name, file, line_start, line_end, signature |
-| `:Class` | Dichiarazione con attributi/metodi | name, file, line_start, line_end, extends |
-| `:Module` | File importabile o namespace | name, path, type (file/package) |
-| `:Variable` | Assign con scope > locale | name, file, line_start, scope |
-| `:Type` | Type definition, typedef, alias | name, file, line_start, kind (enum/struct/union) |
-| `:Concept` | Entità semantica da documentazione | name, source, line_start, category |
-| `:Requirement` | Specifica funzionale/non-funzionale | text, source, line_start, priority |
-| `:API` | Interfaccia documentata pubblica | name, source, line_start, visibility |
-| `:Document` | File di documentazione | path, title, type (md/rst/txt) |
+### Node Types - File System Layer
+| Label | Proprietà Obbligatorie |
+|-------|----------------------|
+| `:Directory` | uid, path, name, parent_uid |
+| `:SourceFile` | uid, path, name, extension, size_bytes, sha256_hash, line_count (se testo), detected_type (code/doc/config/binary/other) |
+
+### Relationships - File System Layer
+```cypher
+(:Directory)-[:CONTAINS]->(:Directory)
+(:Directory)-[:CONTAINS]->(:SourceFile)
+(:SourceFile)-[:IMPORTS]->(:SourceFile)  // solo se import risolto con uid
+```
+
+**VINCOLO**: Se un file esiste in `/raw_data/`, DEVE avere un nodo `:SourceFile`. Nessuna eccezione.
+
+## SOURCE CHUNK SPECIFICATION (OPZIONE 2 - EVIDENCE PRESERVATION)
+Ogni file di testo DEVE essere segmentato in `:SourceChunk` nodi per preservare evidenza esatta.
+
+### Chunking Strategy
+| File Type | Chunk Size | Overlap | Boundary Rule |
+|-----------|------------|---------|---------------|
+| Codice (.py, .c, .java, etc.) | Per funzione/classe | 0 linee | AST node boundaries |
+| Documentazione (.md, .rst) | Per sezione (heading) | 0 linee | Markdown heading boundaries |
+| Config (.json, .yaml) | Per top-level key | 0 | JSON/YAML structure |
+| Altro testo | 50-100 linee | 10 linee | Fixed-size con overlap |
+
+### SourceChunk Node Properties
+```python
+{
+    "uid": "SourceChunk|src/file.py|0|150",  # file_uid|byte_start|byte_end
+    "source_file_uid": "SourceFile|src/file.py",
+    "line_start": int,
+    "line_end": int,
+    "byte_start": int,
+    "byte_end": int,
+    "chunk_hash": "sha256 del testo del chunk",
+    "chunk_order": int,
+    "text_preview": "prime 200 caratteri (opzionale, non full text)",
+}
+```
+
+**VINCOLO DI MEMORIA**: Non memorizzare il testo completo nel chunk se >10KB. Usare `text_preview` e riferire al file source per recupero completo.
+
+### Relationships - Chunk Layer
+```cypher
+(:SourceFile)-[:CONTAINS_CHUNK]->(:SourceChunk)
+(:SourceChunk)-[:NEXT]->(:SourceChunk)  # per navigazione sequenziale
+```
+
+## ENTITY TYPES - SEMANTIC LAYER (OPZIONE 3 - PROVENANCE-AWARE)
+Ogni entità semantica DEVE riferire a uno o più `SourceChunk` come evidenza.
+
+| Label | Proprietà Obbligatorie | Provenance Required |
+|-------|----------------------|---------------------|
+| `:Function` | uid, name, file_uid, chunk_uid, line_start, line_end, signature | ✅ |
+| `:Class` | uid, name, file_uid, chunk_uid, line_start, line_end, extends | ✅ |
+| `:Module` | uid, name, file_uid, chunk_uid (opzionale) | ✅ |
+| `:Variable` | uid, name, file_uid, chunk_uid, line_start, scope | ✅ |
+| `:Type` | uid, name, file_uid, chunk_uid, line_start, kind | ✅ |
+| `:Concept` | uid, name, chunk_uid, category, evidence_text | ✅ |
+| `:Requirement` | uid, text, chunk_uid, line_start, priority, evidence_text | ✅ |
+| `:API` | uid, name, chunk_uid, line_start, visibility, evidence_text | ✅ |
+| `:Document` | uid, file_uid, title, type | ✅ |
 
 **VINCOLO DI MODELLO DATI**: 
-- `:Entity` come label generico è **VIETATO** per nodi tipizzati
-- Il tipo deve essere un label, non una proprietà `type`
-- Query Cypher devono usare `MATCH (n:Function)` non `MATCH (n:Entity WHERE n.type = "Function")`
+- `evidence_text` proprietà obbligatoria per `:Concept`, `:Requirement`, `:API` (max 500 caratteri)
+- `chunk_uid` obbligatorio per tutte le entità semantiche
+- Entità senza chunk di evidenza = **SCARTARE**
 
-## RELATION TYPES (PREDICATI COME RELATIONSHIP TYPE)
-Ogni predicato DEVE corrispondere a un **relationship type distinto** nel graph database, non a una proprietà.
+## RELATION TYPES - CON PROVENANCE ESPLICITA
+Ogni relazione DEVE includere riferimento al chunk di evidenza.
 
-| Category | Relationship Types (Cypher) | Semantica |
-|----------|----------------------------|-----------|
-| **Structural** | `:CONTAINS`, `:DECLARES`, `:IMPORTS`, `:EXTENDS`, `:IMPLEMENTS`, `:INSTANTIATES` | Struttura codice |
-| **Behavioral** | `:CALLS`, `:USES`, `:RETURNS`, `:THROWS`, `:OVERRIDES`, `:ASSIGNES_TO` | Comportamento runtime |
-| **Semantic** | `:DESCRIBES`, `:SATISFIES`, `:ILLUSTRATES`, `:CONSTRAINS`, `:DEFINES` | Significato documentazione |
-| **Architectural** | `:DEPENDS_ON`, `:CONNECTS_TO`, `:DELEGATES_TO`, `:CONFIGURES` | Architettura sistema |
+| Category | Relationship Types | Provenance Property |
+|----------|-------------------|---------------------|
+| **Structural** | `:CONTAINS`, `:DECLARES`, `:IMPORTS`, `:EXTENDS`, `:IMPLEMENTS` | `source_chunk_uid`, `evidence_line` |
+| **Behavioral** | `:CALLS`, `:USES`, `:RETURNS`, `:THROWS`, `:OVERRIDES` | `source_chunk_uid`, `evidence_line`, `is_explicit` (bool) |
+| **Semantic** | `:DESCRIBES`, `:SATISFIES`, `:ILLUSTRATES`, `:CONSTRAINS`, `:DEFINES` | `source_chunk_uid`, `evidence_text` (snippet), `confidence` |
+| **Architectural** | `:DEPENDS_ON`, `:CONNECTS_TO`, `:DELEGATES_TO` | `source_chunk_uid`, `rationale` |
 
-**VINCOLO DI MODELLO DATI**:
-- `:RELATED` come relationship type generico è **VIETATO**
-- Il predicato deve essere il tipo di relazione, non una proprietà `predicate`
-- Query Cypher devono usare `MATCH (a)-[:CALLS]->(b)` non `MATCH (a)-[:RELATED {predicate: "CALLS"}]->(b)`
-
-## CONFIDENCE SCORE (DEFINIZIONE CONTEXTUAL)
-Il confidence score (0-1) è una **proprietà della relazione**, non del nodo.
-
-| Range | Significato | Criterio |
-|-------|-------------|----------|
-| 0.90-1.0 | Esplicito | Dichiarazione diretta nel codice/doc |
-| 0.75-0.89 | Fortemente inferito | Pattern ricorrente + convenzioni naming |
-| 0.60-0.74 | Inferito da contesto | Deduzione da uso consistente |
-| 0.40-0.59 | Ipotesi debole | Basato su singole occorrenze |
-| <0.40 | Scarta | Troppo speculativo |
-
-## ESTRATTORE MULTI-LIVELLO - APPROCCIO TEAM SVILUPPATORI
-
-### Livello 1: Estrazione Strutturale (Static Analysis Surrogate)
-**Per Codice**:
-```
-Nodi (con label specifici):
-  (:Module {name: "file.py", path: "src/file.py"})
-  (:Function {name: "process_data", file: "src/file.py", line: 10})
-  (:Class {name: "DataHandler", file: "src/file.py", line: 25})
-  (:Variable {name: "GLOBAL_CONFIG", file: "src/file.py", line: 5})
-
-Relazioni (con type specifici):
-  (:Module)-[:CONTAINS]->(:Function)
-  (:Function)-[:CALLS]->(:Function)
-  (:Function)-[:USES]->(:Variable)
-  (:Class)-[:EXTENDS]->(:Class)
-  (:Module)-[:IMPORTS]->(:Module)
+### Relationship Schema (JSONL)
+```json
+{
+    "subject_uid": "Function|src/file.py|process_data",
+    "predicate": "CALLS",
+    "object_uid": "Function|src/other.py|helper_func",
+    "source_chunk_uid": "SourceChunk|src/file.py|1200|1500",
+    "evidence_line": 45,
+    "evidence_text": "result = helper_func(input_data)",
+    "is_explicit": true,
+    "confidence": 0.95,
+    "extraction_method": "AST"
+}
 ```
 
-**Per Documentazione**:
+**VINCOLO**: 
+- `is_explicit = true` solo se la relazione è direttamente visibile nell'AST o testo
+- `is_explicit = false` se inferita da pattern/context (confidence ≤ 0.75)
+- `evidence_text` obbligatorio se `is_explicit = false`
+
+## CONFIDENCE SCORE - DEFINIZIONE RIGOROSA
+Il confidence score (0-1) è **proprietà esclusiva della relazione**, non del nodo.
+
+| Range | Significato | Criterio | Estrazione Method |
+|-------|-------------|----------|-------------------|
+| 0.90-1.0 | Esplicito | Dichiarazione diretta nell'AST | AST parser |
+| 0.75-0.89 | Fortemente inferito | Pattern ricorrente + convenzioni | Regex + contesto |
+| 0.60-0.74 | Inferito da contesto | Deduzione da uso consistente | Heuristic |
+| 0.40-0.59 | Ipotesi debole | Singola occorrenza | Heuristic |
+| <0.40 | **SCARTARE** | Troppo speculativo | N/A |
+
+**VINCOLO**: Relazioni con confidence < 0.40 NON devono essere incluse nell'output. Devono essere loggate in `ambiguities.json`.
+
+## ESTRATTORE MULTI-LIVELLO - ARCHITETTURA
+
+### Livello 0: File Inventory (MANDATORY PRIMO STEP)
+```python
+# Pseudocodice obbligatorio
+for every file in /raw_data/:
+    create :SourceFile node with:
+        - uid = f"SourceFile|{relative_path}"
+        - sha256_hash = compute_hash(file)
+        - detected_type = classify(file)  # code/doc/config/binary
+    create :Directory nodes per ogni directory
+    create (:Directory)-[:CONTAINS]->(:SourceFile/Directory)
 ```
-Nodi (con label specifici):
-  (:Document {path: "doc/api.md", title: "API Reference"})
-  (:Concept {name: "interrupt handler", source: "doc/api.md", line: 45})
-  (:Requirement {text: "LATENCY < 10ms", source: "doc/req.md", line: 12})
 
-Relazioni (con type specifici):
-  (:Document)-[:HAS_SECTION]->(:Concept)
-  (:Concept)-[:DESCRIBES]->(:Function)
-  (:Requirement)-[:SATISFIED_BY]->(:Function)
+### Livello 1: Source Chunking (MANDATORY SECONDO STEP)
+```python
+# Pseudocodice obbligatorio
+for every text file in /raw_data/:
+    chunks = segment_file(file, strategy_by_extension)
+    for chunk in chunks:
+        create :SourceChunk node con proprietà definite
+        create (:SourceFile)-[:CONTAINS_CHUNK]->(:SourceChunk)
 ```
 
-### Livello 2: Estrazione Semantica (LLM-based Human Surrogate)
-Identificare entità non esplicite nell'AST:
-- Concetti di dominio (es. "real-time constraint", "memory pool")
-- Pattern architetturali (es. state machine, producer-consumer)
-- Dipendenze implicite (es. "assume X inizializzato")
-- Constraint non funzionali (timing, memory, concurrency)
+### Livello 2: AST-Based Structural Extraction (PRIORITÀ SU REGEX)
+**Per Python**:
+```python
+import ast
+# Usare ast.parse() per tutte le entità strutturate
+# NON usare regex per funzioni/classi se AST è disponibile
+```
 
-### Livello 3: Cross-Linking Codice-Documentazione
+**Per C/C++/Java**:
+```python
+# Usare parser dedicati se disponibili (pycparser, javalang)
+# Fallback a regex solo se parser non disponibile
+```
+
+**VINCOLO**: Se un parser AST esiste per il linguaggio, DEVE essere usato. Regex è fallback solo per linguaggi senza parser disponibile.
+
+### Livello 3: Semantic Extraction con Evidence
+Per ogni entità semantica (`:Concept`, `:Requirement`, `:API`):
+1. Identificare nel testo
+2. Estrarre `evidence_text` (max 500 caratteri circostanti)
+3. Identificare `chunk_uid` contenente l'entità
+4. Assegnare confidence basata su metodo di estrazione
+
+### Livello 4: Cross-Linking con Entity Resolution Rigoroso
 **Entity Resolution**:
-1. Exact match (nome identico): confidence = 0.95
-2. Signature match (parametri + return type): confidence = 0.85
-3. Context match (stesso modulo): confidence = 0.75
-4. Semantic match (descrizione corrisponde): confidence = 0.70
-
-**Relazioni Cross-Link**:
+```python
+# VINCOLO: Mai risolvere per nome alone
+def resolve_entity(name: str, context: dict) -> Optional[str]:
+    candidates = find_by_name_and_context(name, context)
+    if len(candidates) == 1:
+        return candidates[0].uid
+    elif len(candidates) > 1:
+        # Ambiguità: loggare e scartare o chiedere disambiguazione
+        log_ambiguity(name, candidates)
+        return None  # NON creare relazione ambigua
+    else:
+        return None  # Entità non trovata
 ```
-(:Function)-[:DOCUMENTED_IN]->(:Document)
-(:Requirement)-[:IMPLEMENTED_BY]->(:Module)
-(:API)-[:EXPOSED_BY]->(:Module)
-(:Concept)-[:REFERENCED_IN]->(:Function)
-```
 
-### Livello 4: Arricchimento Contestuale (Graph Analysis)
-1. **Cluster funzionali**: Identificare comunità (es. tutti i moduli UART)
-2. **Nodi critici**: Betweenness centrality per SPOF detection
-3. **Entità isolate**: Segnalare nodi con degree = 0
-4. **Percorsi frequenti**: Pre-calcolare path per query multi-hop
+**VINCOLO**: Se entity resolution non può risolvere univocamente un endpoint, la relazione DEVE essere scartata e loggata in `ambiguities.json`. **NON** usare `LIMIT 1` o creare relazioni ambigue.
+
+### Livello 5: Provenance Validation (POST-PROCESSING)
+```python
+# Per ogni relazione nel grafo finale:
+for relation in all_relations:
+    if not relation.source_chunk_uid:
+        raise Error("Relation missing provenance")
+    if relation.confidence < 0.4:
+        move_to_ambiguities(relation)
+    if not verify_chunk_exists(relation.source_chunk_uid):
+        raise Error("Invalid chunk reference")
+```
 
 ## GRAPH SCHEMA DEFINITION (MANDATORY)
 Lo script DEVE generare `/output/graph_schema.json` con:
@@ -135,258 +222,219 @@ Lo script DEVE generare `/output/graph_schema.json` con:
 ```json
 {
   "node_labels": [
-    {"label": "Function", "count": int, "required_properties": ["name", "file", "line_start"]},
-    {"label": "Class", "count": int, "required_properties": ["name", "file", "line_start"]},
+    {"label": "SourceFile", "count": int, "required_properties": ["uid", "path", "sha256_hash"]},
+    {"label": "SourceChunk", "count": int, "required_properties": ["uid", "source_file_uid", "line_start", "line_end"]},
+    {"label": "Function", "count": int, "required_properties": ["uid", "name", "chunk_uid"]},
     ...
   ],
   "relationship_types": [
-    {"type": "CALLS", "count": int, "start_labels": ["Function"], "end_labels": ["Function"]},
-    {"type": "CONTAINS", "count": int, "start_labels": ["Module"], "end_labels": ["Function", "Class"]},
+    {"type": "CONTAINS_CHUNK", "count": int, "start_labels": ["SourceFile"], "end_labels": ["SourceChunk"]},
+    {"type": "CALLS", "count": int, "start_labels": ["Function"], "end_labels": ["Function"], "provenance_required": true},
     ...
   ],
   "indexes_created": [
-    {"label": "Function", "property": "name"},
-    {"label": "Function", "property": "file"},
+    {"label": "SourceFile", "property": "uid"},
+    {"label": "SourceFile", "property": "path"},
+    {"label": "SourceChunk", "property": "uid"},
+    {"label": "SourceChunk", "property": "source_file_uid"},
+    {"label": "Function", "property": "uid"},
+    {"label": "Function", "property": "chunk_uid"},
     ...
   ]
 }
 ```
 
-## INDEXING STRATEGY (MANDATORY FOR PERFORMANCE)
-Lo script DEVE creare indici su Memgraph per abilitare query efficienti:
+## ENTITY IDENTITY AND RELATIONSHIP SAFETY (MANDATORY - RAFFORZATO)
 
-```cypher
-CREATE INDEX ON :Function(name);
-CREATE INDEX ON :Function(file);
-CREATE INDEX ON :Function(uid);
-CREATE INDEX ON :Class(uid);
-CREATE INDEX ON :Module(uid);
-CREATE INDEX ON :Variable(uid);
-CREATE INDEX ON :Type(uid);
-CREATE INDEX ON :Concept(uid);
-CREATE INDEX ON :Requirement(uid);
-CREATE INDEX ON :API(uid);
-CREATE INDEX ON :Document(uid);
-CREATE INDEX ON :Class(name);
-CREATE INDEX ON :Module(path);
-CREATE INDEX ON :Requirement(text);
-CREATE INDEX ON :Document(path);
+### UID Format (Deterministico e Unico)
+```python
+# Formato obbligatorio per tutti i nodi
+uid = f"{Label}|{relative_path}|{local_identifier}"
+
+# Esempi:
+"SourceFile|src/module.py"
+"SourceChunk|src/module.py|0|150"  # byte offsets
+"Function|src/module.py|process_data"
+"Requirement|docs/req.md|REQ-001"
 ```
 
-**Giustificazione**: Senza indici, query su 140k nodi richiedono scan completi (O(n)). Con indici, lookup è O(log n).
+### Relationship Endpoint Resolution (NO NAME-ONLY LOOKUP)
+```cypher
+// VIETATO - Non usare mai
+MATCH (a {name: "process_data"})
 
-## LOGGING STRATEGY
+// OBBLIGATORIO - Usare sempre uid
+MATCH (a:Function {uid: "Function|src/module.py|process_data"})
+```
+
+### Duplicate Detection
+```python
+# Prima di inserire una relazione:
+key = (subject_uid, predicate, object_uid)
+if key in existing_relations:
+    # Merge: mantenere max confidence
+    existing.confidence = max(existing.confidence, new.confidence)
+else:
+    add_relation(new)
+```
+
+## MEMGRAPH INGESTION SPECIFICATION (RAFFORZATO)
+
+### Pre-Ingestion Validation
+```python
+# OBBLIGATORIO prima dell'ingestion
+def validate_extraction(extraction):
+    errors = []
+    for entity in extraction.entities:
+        if entity.label not in {"SourceFile", "SourceChunk"} and not entity.chunk_uid:
+            errors.append(f"Entity {entity.uid} missing chunk_uid")
+    for relation in extraction.relations:
+        if not relation.source_chunk_uid:
+            errors.append(f"Relation {relation.subject}->{relation.object} missing provenance")
+    if errors:
+        raise ValidationError(errors)
+```
+
+### Clean-Load Operation
+```cypher
+// OBBLIGATORIO a meno di --append
+MATCH (n) DETACH DELETE n
+```
+
+### Index Creation (Per-Label, Autocommit)
+```python
+# Ogni indice in transazione separata (Memgraph compatibility)
+index_specs = [
+    ("SourceFile", "uid"),
+    ("SourceFile", "path"),
+    ("SourceChunk", "uid"),
+    ("SourceChunk", "source_file_uid"),
+    ("Function", "uid"),
+    ("Function", "chunk_uid"),
+    ("Class", "uid"),
+    ("Module", "uid"),
+    ("Document", "uid"),
+]
+for label, prop in index_specs:
+    execute_in_autocommit(f"CREATE INDEX ON :{label}({prop})")
+```
+
+### Post-Ingestion Verification (RAFFORZATO)
+```python
+# Verifica obbligatoria
+verify_queries = [
+    "MATCH (n:SourceFile) RETURN count(n) AS files",
+    "MATCH (n:SourceChunk) RETURN count(n) AS chunks",
+    "MATCH (n) WHERE NOT (n)--() RETURN count(n) AS isolated",
+    "MATCH ()-[r]->() WHERE NOT r.source_chunk_uid RETURN count(r) AS missing_provenance",
+]
+
+# Se missing_provenance > 0, fallire con exit code 1
+```
+
+## LOGGING STRATEGY (EXPANDED)
 | Livello | File | Contenuto |
 |---------|------|-----------|
-| 1 | `level_1_structural.log` | File processati, entità estratte, errori parsing |
-| 2 | `level_2_semantic.log` | Concetti impliciti, pattern architetturali, decisioni confidence |
-| 3 | `level_3_crosslink.log` | Match codice-doc, entity resolution, ambiguità |
-| 4 | `level_4_graph.log` | Metriche grafo, indici creati, verifica ingestion |
-| Access | `access_log.jsonl` | Tutti i file letti con validazione scope |
+| 0 | `level_0_inventory.log` | File inventory creation, hash computation, type detection |
+| 1 | `level_1_chunking.log` | Chunk creation, segmentation strategy, errors |
+| 2 | `level_2_structural.log` | AST extraction, parser errors, fallback a regex |
+| 3 | `level_3_semantic.log` | Entità semantiche, evidence extraction, confidence assignment |
+| 4 | `level_4_crosslink.log` | Entity resolution, ambiguità, relazioni scartate |
+| 5 | `level_5_graph.log` | Ingestion, validation, verification queries |
+| Access | `access_log.jsonl` | Tutti i file letti con hash e validazione scope |
 
-## GESTIONE ERRORI (CONTEXT-AWARE)
+## GESTIONE ERRORI (CONTEXT-AWARE - RAFFORZATO)
 | Scenario | Azione | Log |
 |----------|--------|-----|
-| File non leggibile (encoding) | Skip con warning, tenta encoding alternativo | `parse_errors.log` |
-| Syntax error nel codice | Estrai comunque entità parsabili, segnala limite | `parse_errors.log` |
-| Documentazione malformattata | Estrai testo raw, flag `unstructured` | `parse_errors.log` |
-| Memoria insufficiente | Processa file-by-file con garbage collection intermedia | `level_X.log` |
-| Violazione isolamento | Fallire con exit code 1 | `access_log.jsonl` |
-| Memgraph connection failure | Fallire con exit code 1, logga errore | `level_4_graph.log` |
+| File non leggibile | Skip con warning, logga in inventory come `unreadable` | `level_0_inventory.log` |
+| Parser AST fallisce | Fallback a regex, flag `extraction_method: "regex"` | `level_2_structural.log` |
+| Entity resolution ambiguo | Scarta relazione, logga in `ambiguities.json` | `level_4_crosslink.log` |
+| Provenance missing | **Fallire** con exit code 1 | `level_5_graph.log` |
+| Memgraph connection failure | Fallire con exit code 1 | `level_5_graph.log` |
 
-## AMBIGUITÀ SEGNALATE (OBBLIGATORIO)
+## AMBIGUITÀ SEGNALATE (EXPANDED)
 Genera report `/output/ambiguities.json` per:
 
 1. **Nomi generici**: ["config", "data", "temp", "buf", "handler", "manager"]
 2. **Relazioni a bassa confidence** (< 0.6)
-3. **Entità isolate** (degree = 0)
-4. **Discrepanze codice-documentazione**
-5. **Pattern ambigui** (funzioni >100 righe senza commenti, violazioni SRP)
-
-## POST-PROCESSING
-1. **Normalizzazione nomi**: lowercase, rimozione prefissi comuni
-2. **Deduplicazione cross-file**: Entità con nome identico + signature simile = merge con confidence weighting
-3. **Consolidamento relazioni**: Relazioni duplicate con gli stessi endpoint UID e tipo
-   = merge con max confidence; relazioni omonime in file diversi NON sono duplicate
-4. **Export finale**: Formato coerente con `/DB/example_extraction_script.py`; se il progetto fornisce un format alternativo in output, dovrà essere compatibile con lo schema JSONL già usato dallo script di riferimento
-
-## ISTRUZIONI ARCHITETTURALI (DA example_extraction_script.py)
-**VINCOLANTE**: Analizzare `/DB/example_extraction_script.py` per estrarre:
-- Struttura delle classi/funzioni dello script
-- Query database utilizzate (caricamento, inserimento, update)
-- Librerie importate e loro uso specifico
-- Pattern di gestione errori
-- Conformità a una pipeline locale di estrazione e ingestion, senza dipendenze da file esterni o dati non presenti in `/raw_data/`
-
-**Integrazione**: Lo script generato DEVE seguire l'architettura dell'esempio, adattandola al caso d'uso multi-livello descritto e al repository reale presente in `/raw_data/`.
-
-## MEMGRAPH INGESTION SPECIFICATION (CRITICAL)
-
-### Node Ingestion (Type-Specific Labels)
-```cypher
-// FUNZIONE - Label specifico, non :Entity generico
-MERGE (n:Function {uid: $uid})
-SET n.line_start = $line_start, 
-    n.line_end = $line_end, 
-    n.signature = $signature,
-    n.confidence = $confidence
-
-// CLASS - Label specifico
-MERGE (n:Class {uid: $uid})
-SET n.line_start = $line_start,
-    n.extends = $extends,
-    n.confidence = $confidence
-
-// DOCUMENT - Label specifico
-MERGE (n:Document {uid: $uid, path: $path})
-SET n.title = $title, n.type = $doc_type
-```
-
-### Relationship Ingestion (Explicit Types)
-```cypher
-// CALLS - Tipo esplicito, non :RELATED {predicate: "CALLS"}
-MATCH (caller:Function {uid: $caller_uid})
-MATCH (callee:Function {uid: $callee_uid})
-MERGE (caller)-[r:CALLS]->(callee)
-SET r.confidence = $confidence, r.line = $line
-
-// CONTAINS - Tipo esplicito
-MATCH (module:Module {uid: $module_uid})
-MATCH (func:Function {uid: $func_uid})
-MERGE (module)-[r:CONTAINS]->(func)
-SET r.confidence = 1.0
-
-// DESCRIBES - Cross-link codice-documentazione
-MATCH (doc:Document {uid: $doc_uid})
-MATCH (func:Function {uid: $func_uid})
-MERGE (doc)-[r:DESCRIBES]->(func)
-SET r.confidence = $confidence, r.rationale = $rationale
-```
-
-### ENTITY IDENTITY AND RELATIONSHIP SAFETY (MANDATORY)
-Entity names are not globally unique in a multi-file codebase. Every node MUST have a
-deterministic `uid` containing its label and source path (for example
-`Function|src/a.py|process_data`). Use `uid` for all `MERGE` and relationship endpoint
-lookups; never resolve endpoints by `name` alone.
-
-Every exported relation MUST retain source provenance and resolve to exactly one
-source node and one target node. Relationship ingestion MUST:
-
-1. Match by endpoint `uid` (or by `(label, name, file/path)` with a uniqueness check).
-2. Reject and log ambiguous or unresolved endpoints instead of using `LIMIT 1` or
-   creating a Cartesian product.
-3. Never use an untyped `MATCH (a)`/`MATCH (b)` name lookup.
-4. Verify that the number of ingested relationships equals the number of resolvable
-   exported relations; report skipped relations with their reason and source line.
-5. Preserve endpoint labels and source paths in `graph_schema.json`.
-
-Before a normal ingestion run, the script MUST perform a clean-load operation
-(`MATCH (n) DETACH DELETE n`) unless an explicit `--append` option is supplied.
-The clean-load result and the final node/relationship counts MUST be logged.
-
-### Index Creation (Pre-Ingestion)
-```cypher
-CREATE INDEX ON :Function(name);
-CREATE INDEX ON :Function(file);
-CREATE INDEX ON :Class(name);
-CREATE INDEX ON :Module(path);
-CREATE INDEX ON :Document(path);
-CREATE INDEX ON :Requirement(text);
-```
-
-Memgraph versions that do not support `IF NOT EXISTS` MUST be handled by executing
-each index DDL statement in its own autocommit transaction and treating only an
-already-existing-index error as non-fatal. Index DDL MUST NOT be issued inside a
-multi-command transaction.
-
-### Verification Query (Post-Ingestion)
-```cypher
-// Verifica conteggio per label
-MATCH (n:Function) RETURN count(n) AS functions;
-MATCH (n:Class) RETURN count(n) AS classes;
-MATCH (n:Document) RETURN count(n) AS documents;
-
-// Verifica conteggio per relationship type
-MATCH ()-[r:CALLS]->() RETURN count(r) AS calls;
-MATCH ()-[r:CONTAINS]->() RETURN count(r) AS contains;
-MATCH ()-[r:DESCRIBES]->() RETURN count(r) AS describes;
-
-// Verifica entità isolate
-MATCH (n) WHERE NOT (n)--() RETURN count(n) AS isolated;
-```
+3. **Entity resolution ambiguo** (>1 candidato con score simile)
+4. **Provenance missing** (entità senza chunk_uid)
+5. **Entità isolate** (degree = 0, esclusi SourceFile/SourceChunk)
+6. **Discrepanze codice-documentazione**
+7. **File unreadable** o con encoding non risolvibile
 
 ## QUALITÀ ATTESA (ONE-TIME EXECUTION)
-- **Completezza**: Estrazione esaustiva di tutte le entità identificabili
-- **Graph-Native Model**: Label tipizzati per nodi, relationship type espliciti
-- **Query Efficiency**: Indici creati per proprietà di lookup frequenti
-- **Tracciabilità**: Ogni entità/relazione riferibile a file + riga
-- **Agent-Ready**: Query pattern ottimizzati per agent downstream
+- **Completezza file-level**: 100% dei file in `/raw_data/` ha nodo `:SourceFile`
+- **Provenance completa**: 100% delle entità semantiche ha `chunk_uid`
+- **Relazioni evidence-backed**: 100% delle relazioni ha `source_chunk_uid`
+- **Zero relazioni ambigue**: Nessuna relazione con endpoint non risolti univocamente
+- **Graph-Native Model**: Label tipizzati, relationship type espliciti
+- **Query Efficiency**: Indici creati per uid e proprietà di lookup
 
-## NOTA OPERATIVA FINALE
-
-Questo script è un **surrogato di un processo umano+AI** che conoscerà il codebase in profondità. L'obiettivo non è automazione perfetta, ma **evidenziazione sistematica** di nodi e relazioni che un team di sviluppatori identificherebbe in una code review collaborativa.
-
-### VINCOLO DI ISOLAMENTO (MANDATORY)
+## VINCOLO DI ISOLAMENTO (MANDATORY - INVARATO)
 **Fonte dati unica**: `/raw_data/` e tutte le sue sottocartelle.
 
 **VIETATO**:
-- Accesso a internet (HTTP/HTTPS, API remote, DNS lookup)
-- Lettura da filesystem esterni a `/raw_data/`, `/DB/`, `/output/`, `/logs/`
-- Import di moduli non presenti in standard library o già installati nel runtime
-- Download o installazione di nuove dipendenze durante l'esecuzione
+- Accesso a internet
+- Lettura da filesystem esterni
+- Installazione nuove dipendenze
 
 **PERMESSO**:
 - Standard library Python
-- Librerie già installate nel runtime (es. `mgclient`, `yaml`)
-- Moduli definiti all'interno di `/raw_data/` (da analizzare come parte del codebase)
+- Librerie già installate (`mgclient`, `yaml`, `pycparser` se presente)
 - Directory di output: `/output/`, `/logs/`
 
-### VERIFICA TECNICA
-Lo script DEVE:
-1. Loggare tutti i file letti in `/logs/access_log.jsonl`
-2. Risolvere symlink e validare target entro `/raw_data/`
-3. Fallire con exit code 1 se violazioni rilevate
-4. Flaggaare URL/risorse esterne nel contenuto dei file
+## PRIORITÀ OPERATIVE (RE-ORDERED)
+1. **File inventory completo**: Ogni file deve avere un nodo
+2. **Source chunking**: Ogni file testo deve essere segmentato
+3. **Provenance obbligatoria**: Nessuna entità/relation senza chunk reference
+4. **AST-first extraction**: Usare parser quando disponibile
+5. **Entity resolution rigoroso**: Scartare ambigui invece di indovinare
+6. **Relazioni semantiche**: Solo se evidence-backed
 
-### MEMGRAPH INGESTION (MANDATORY)
+## NOTA OPERATIVA FINALE
+
+Questo script è un **surrogato di un processo umano+AI** che conoscerà il codebase in profondità. L'obiettivo non è automazione perfetta, ma **evidenziazione sistematica e tracciabile** di nodi e relazioni.
+
+**CAMBIAMENTO CHIAVE vs VERSIONE PRECEDENTE**:
+- Prima: "Estrai quante più entità possibili"
+- Ora: "Estrai solo entità con evidenza tracciabile, scarta il resto"
+
+**Trade-off accettato**:
+- Meno entità totali (scarto di inferenze deboli)
+- Più accuratezza e verificabilità
+- Agent downstream possono validare ogni affermazione contro source text
+
+## MEMGRAPH INGESTION (MANDATORY - RAFFORZATO)
+
 Dopo estrazione e validazione export, eseguire lo script generato **senza** `--skip-db` per caricare il grafo in Memgraph.
 
-**Requisiti**:
-- Usare `connect_memgraph()` e `ingest_memgraph()` implementate
-- Preservare configurazione HOST, PORT, USERNAME, PASSWORD
-- Completare export file prima dell'ingestion
-- Fallire con exit code non-zero se connection o query falliscono
-- Loggare start, completion, failure in `level_4_graph.log`
-- Verificare post-ingestion con query di conteggio per label e relationship type
-
-**Verifica Obbligatoria**:
+**Verifica Obbligatoria Post-Ingestion**:
 ```python
 # Dopo ingestion, eseguire query di verifica
-verify_query = """
-MATCH (n)
-WITH count(DISTINCT labels(n)) AS unique_labels
-MATCH ()-[r]->()
-RETURN unique_labels, count(DISTINCT type(r)) AS unique_relationship_types
-"""
-# Se unique_labels < 5, segnalare warning: modello dati non ottimale
-# Se unique_relationship_types < 8, segnalare warning: relazioni troppo generiche
+verification_queries = {
+    "files": "MATCH (n:SourceFile) RETURN count(n)",
+    "chunks": "MATCH (n:SourceChunk) RETURN count(n)",
+    "entities_with_provenance": "MATCH (n) WHERE n.chunk_uid IS NOT NULL RETURN count(n)",
+    "relations_with_provenance": "MATCH ()-[r]->() WHERE r.source_chunk_uid IS NOT NULL RETURN count(r)",
+    "relations_missing_provenance": "MATCH ()-[r]->() WHERE r.source_chunk_uid IS NULL RETURN count(r)",
+}
+
+# Se relations_missing_provenance > 0, fallire con exit code 1
+# Se entities_with_provenance < total_entities * 0.95, warning
 ```
 
-The verification MUST also compare exported and ingested counts per relationship
-type, detect duplicate `(source_uid, relationship_type, target_uid)` triples, and
-fail with a non-zero exit code when unexpected multiplication or unresolved endpoint
-expansion is detected.
-
-### PRIORITÀ OPERATIVE
-1. **Modello dati graph-native**: Label tipizzati, relationship type espliciti
-2. **Relazioni semantiche**: Priorità a relazioni non ovvie dall'AST
-3. **Ambiguità esplicite**: Segnalare invece di risolvere arbitrariamente
-4. **Tracciabilità completa**: File + riga per ogni entità/relazione
-
-### RAZIONALE
-Questo approccio garantisce:
-- **Query Efficiency**: Agent downstream possono fare traversal specifici (O(log n) vs O(n))
-- **Pattern Matching**: Query come `MATCH (f:Function)-[:CALLS]->(g:Function)` sono native
-- **Graph Algorithms**: Centrality, community detection funzionano su tipi specifici
-- **Manutenibilità**: Schema esplicito documentato in `graph_schema.json`
+**Expected Counts Validation**:
+```python
+# Confronta exported vs ingested
+exported_files = len(file_inventory)
+ingested_files = query_count("SourceFile")
+if exported_files != ingested_files:
+    raise RuntimeError(f"File count mismatch: exported {exported_files}, ingested {ingested_files}")
 ```
+
+The verification MUST also:
+1. Compare exported and ingested counts per relationship type
+2. Detect duplicate `(subject_uid, predicate, object_uid)` triples
+3. Fail with non-zero exit code when unresolved endpoint expansion is detected
+4. Verify that all `:SourceFile` nodes match the file inventory
