@@ -1,186 +1,360 @@
 {
+  "generated_at": "2026-09-17T14:44:43.206034+00:00",
+  "metrics": {
+    "total_entities": 127358,
+    "total_relations": 247376,
+    "entity_type_distribution": {
+      "Folder": 3845,
+      "SourceFile": 17354,
+      "Class": 2714,
+      "Concept": 11535,
+      "DTBinding": 46,
+      "DTNode": 20040,
+      "Document": 1244,
+      "Function": 32569,
+      "KconfigOption": 7103,
+      "Macro": 18517,
+      "Requirement": 1704,
+      "Type": 1154,
+      "Variable": 9533
+    },
+    "relation_type_distribution": {
+      "CONTAINS": 22903,
+      "CALLS": 37716,
+      "CHILD_OF": 12810,
+      "COMPATIBLE_WITH": 276,
+      "DECLARES": 90882,
+      "DEPENDS_ON": 1319,
+      "HAS_SECTION": 11535,
+      "INCLUDES": 15496,
+      "REFERENCES": 15844,
+      "SATISFIES": 854,
+      "SELECTS": 1693,
+      "SETS": 36048
+    },
+    "ambiguities_flagged": 1761,
+    "unresolved_relations": 0,
+    "isolated_nodes": 1,
+    "file_completeness": {
+      "discovered_file_count": 17354,
+      "source_file_node_count": 17354
+    }
+  },
   "node_labels": [
     {
-      "label": "API",
-      "count": 2537,
+      "label": "Class",
+      "count": 2714,
       "required_properties": [
+        "uid",
         "name",
-        "source",
-        "line_start"
+        "file",
+        "line_start",
+        "kind"
       ]
     },
     {
-      "label": "Class",
-      "count": 15927,
+      "label": "Concept",
+      "count": 11535,
       "required_properties": [
+        "uid",
         "name",
         "file",
         "line_start"
       ]
     },
     {
-      "label": "Concept",
-      "count": 4548,
+      "label": "DTBinding",
+      "count": 46,
       "required_properties": [
+        "uid",
+        "compatible"
+      ]
+    },
+    {
+      "label": "DTNode",
+      "count": 20040,
+      "required_properties": [
+        "uid",
         "name",
-        "source",
-        "line_start"
+        "file",
+        "node_path"
       ]
     },
     {
       "label": "Document",
-      "count": 3443,
+      "count": 1244,
       "required_properties": [
+        "uid",
         "path",
         "title"
       ]
     },
     {
-      "label": "Function",
-      "count": 24997,
+      "label": "Folder",
+      "count": 3845,
       "required_properties": [
-        "name",
-        "file",
-        "line_start"
+        "uid",
+        "path",
+        "name"
       ]
     },
     {
-      "label": "Module",
-      "count": 17354,
+      "label": "Function",
+      "count": 32569,
       "required_properties": [
+        "uid",
         "name",
-        "path"
+        "file",
+        "line_start",
+        "kind"
+      ]
+    },
+    {
+      "label": "KconfigOption",
+      "count": 7103,
+      "required_properties": [
+        "uid",
+        "name",
+        "kind"
+      ]
+    },
+    {
+      "label": "Macro",
+      "count": 18517,
+      "required_properties": [
+        "uid",
+        "name",
+        "file",
+        "line_start",
+        "kind"
       ]
     },
     {
       "label": "Requirement",
-      "count": 5390,
+      "count": 1704,
       "required_properties": [
+        "uid",
         "text",
-        "source",
+        "file",
         "line_start"
+      ]
+    },
+    {
+      "label": "SourceFile",
+      "count": 17354,
+      "required_properties": [
+        "uid",
+        "path",
+        "name",
+        "sha256_hash",
+        "detected_type"
       ]
     },
     {
       "label": "Type",
-      "count": 2513,
+      "count": 1154,
       "required_properties": [
+        "uid",
         "name",
         "file",
-        "line_start"
+        "line_start",
+        "kind"
       ]
     },
     {
       "label": "Variable",
-      "count": 4137,
+      "count": 9533,
       "required_properties": [
+        "uid",
         "name",
         "file",
         "line_start"
-      ]
-    },
-    {
-      "label": "SourceChunk",
-      "count": 22531,
-      "required_properties": [
-        "uid",
-        "source_file",
-        "line_start",
-        "line_end",
-        "content"
       ]
     }
   ],
   "relationship_types": [
     {
       "type": "CALLS",
-      "count": 21122,
+      "count": 37716,
       "start_labels": [
-        "Function",
-        "Module"
+        "Function"
       ],
       "end_labels": [
-        "Class",
         "Function"
       ]
     },
     {
-      "type": "CONTAINS",
-      "count": 57498,
+      "type": "CHILD_OF",
+      "count": 12810,
       "start_labels": [
-        "Module"
+        "DTNode"
+      ],
+      "end_labels": [
+        "DTNode"
+      ]
+    },
+    {
+      "type": "COMPATIBLE_WITH",
+      "count": 276,
+      "start_labels": [
+        "DTNode"
+      ],
+      "end_labels": [
+        "DTBinding"
+      ]
+    },
+    {
+      "type": "CONTAINS",
+      "count": 22903,
+      "start_labels": [
+        "Document",
+        "Folder"
+      ],
+      "end_labels": [
+        "Folder",
+        "Requirement",
+        "SourceFile"
+      ]
+    },
+    {
+      "type": "DECLARES",
+      "count": 90882,
+      "start_labels": [
+        "Class",
+        "Function",
+        "SourceFile"
       ],
       "end_labels": [
         "Class",
+        "DTBinding",
+        "DTNode",
         "Function",
+        "KconfigOption",
+        "Macro",
         "Type",
         "Variable"
       ]
     },
     {
       "type": "DEPENDS_ON",
-      "count": 24405,
+      "count": 1319,
       "start_labels": [
-        "Module"
+        "KconfigOption"
       ],
       "end_labels": [
-        "Module"
+        "KconfigOption"
       ]
     },
     {
-      "type": "DESCRIBES",
-      "count": 2540,
+      "type": "HAS_SECTION",
+      "count": 11535,
       "start_labels": [
         "Document"
       ],
       "end_labels": [
-        "API"
+        "Concept"
       ]
     },
     {
-      "type": "EXTENDS",
-      "count": 115,
+      "type": "INCLUDES",
+      "count": 15496,
       "start_labels": [
-        "Class"
+        "SourceFile"
       ],
       "end_labels": [
-        "Class"
+        "SourceFile"
+      ]
+    },
+    {
+      "type": "REFERENCES",
+      "count": 15844,
+      "start_labels": [
+        "DTNode",
+        "Document"
+      ],
+      "end_labels": [
+        "Class",
+        "DTNode",
+        "Document",
+        "Function",
+        "KconfigOption",
+        "Macro",
+        "SourceFile",
+        "Type"
       ]
     },
     {
       "type": "SATISFIES",
-      "count": 35252,
+      "count": 854,
       "start_labels": [
         "Requirement"
       ],
       "end_labels": [
         "Class",
+        "Document",
         "Function",
-        "Module"
+        "KconfigOption",
+        "Macro",
+        "SourceFile",
+        "Type"
       ]
     },
     {
-      "type": "HAS_CHUNK",
-      "count": 22531,
+      "type": "SELECTS",
+      "count": 1693,
       "start_labels": [
-        "Module"
+        "KconfigOption"
       ],
       "end_labels": [
-        "SourceChunk"
+        "KconfigOption"
+      ]
+    },
+    {
+      "type": "SETS",
+      "count": 36048,
+      "start_labels": [
+        "SourceFile"
+      ],
+      "end_labels": [
+        "KconfigOption"
       ]
     }
   ],
   "indexes_created": [
     {
+      "label": "Folder",
+      "property": "uid"
+    },
+    {
+      "label": "SourceFile",
+      "property": "uid"
+    },
+    {
+      "label": "SourceFile",
+      "property": "path"
+    },
+    {
       "label": "Function",
       "property": "uid"
+    },
+    {
+      "label": "Function",
+      "property": "name"
     },
     {
       "label": "Class",
       "property": "uid"
     },
     {
-      "label": "Module",
+      "label": "Class",
+      "property": "name"
+    },
+    {
+      "label": "Type",
+      "property": "uid"
+    },
+    {
+      "label": "Macro",
       "property": "uid"
     },
     {
@@ -188,8 +362,28 @@
       "property": "uid"
     },
     {
-      "label": "Type",
+      "label": "KconfigOption",
       "property": "uid"
+    },
+    {
+      "label": "KconfigOption",
+      "property": "name"
+    },
+    {
+      "label": "DTNode",
+      "property": "uid"
+    },
+    {
+      "label": "DTBinding",
+      "property": "uid"
+    },
+    {
+      "label": "Document",
+      "property": "uid"
+    },
+    {
+      "label": "Document",
+      "property": "path"
     },
     {
       "label": "Concept",
@@ -198,38 +392,6 @@
     {
       "label": "Requirement",
       "property": "uid"
-    },
-    {
-      "label": "API",
-      "property": "uid"
-    },
-    {
-      "label": "Document",
-      "property": "uid"
-    },
-    {
-      "label": "Function",
-      "property": "name"
-    },
-    {
-      "label": "Function",
-      "property": "file"
-    },
-    {
-      "label": "Class",
-      "property": "name"
-    },
-    {
-      "label": "Module",
-      "property": "path"
-    },
-    {
-      "label": "Document",
-      "property": "path"
-    },
-    {
-      "label": "Requirement",
-      "property": "text"
     },
     {
       "label": "SourceChunk",

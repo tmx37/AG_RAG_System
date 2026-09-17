@@ -1,0 +1,268 @@
+{
+  "node_labels": [
+    {
+      "label": "API",
+      "count": 1444,
+      "required_properties": [
+        "name",
+        "source",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Class",
+      "count": 15509,
+      "required_properties": [
+        "name",
+        "file",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Concept",
+      "count": 4548,
+      "required_properties": [
+        "name",
+        "source",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Document",
+      "count": 3443,
+      "required_properties": [
+        "path",
+        "title"
+      ]
+    },
+    {
+      "label": "Function",
+      "count": 24869,
+      "required_properties": [
+        "name",
+        "file",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Module",
+      "count": 17354,
+      "required_properties": [
+        "name",
+        "path"
+      ]
+    },
+    {
+      "label": "Requirement",
+      "count": 5390,
+      "required_properties": [
+        "text",
+        "source",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Type",
+      "count": 2489,
+      "required_properties": [
+        "name",
+        "file",
+        "line_start"
+      ]
+    },
+    {
+      "label": "Variable",
+      "count": 4137,
+      "required_properties": [
+        "name",
+        "file",
+        "line_start"
+      ]
+    },
+    {
+      "label": "SourceChunk",
+      "count": 22531,
+      "required_properties": [
+        "uid",
+        "source_file",
+        "line_start",
+        "line_end",
+        "content"
+      ]
+    }
+  ],
+  "relationship_types": [
+    {
+      "type": "CALLS",
+      "count": 21106,
+      "start_labels": [
+        "Function",
+        "Module"
+      ],
+      "end_labels": [
+        "Class",
+        "Function"
+      ]
+    },
+    {
+      "type": "CONTAINS",
+      "count": 56935,
+      "start_labels": [
+        "Document",
+        "Module"
+      ],
+      "end_labels": [
+        "Class",
+        "Concept",
+        "Function",
+        "Requirement",
+        "Type",
+        "Variable"
+      ]
+    },
+    {
+      "type": "DEPENDS_ON",
+      "count": 24405,
+      "start_labels": [
+        "Module"
+      ],
+      "end_labels": [
+        "Module"
+      ]
+    },
+    {
+      "type": "DESCRIBES",
+      "count": 1447,
+      "start_labels": [
+        "Document"
+      ],
+      "end_labels": [
+        "API"
+      ]
+    },
+    {
+      "type": "EXTENDS",
+      "count": 115,
+      "start_labels": [
+        "Class"
+      ],
+      "end_labels": [
+        "Class"
+      ]
+    },
+    {
+      "type": "REFERENCES",
+      "count": 309,
+      "start_labels": [
+        "API",
+        "Concept"
+      ],
+      "end_labels": [
+        "Class",
+        "Function"
+      ]
+    },
+    {
+      "type": "REPRESENTS",
+      "count": 3443,
+      "start_labels": [
+        "Document"
+      ],
+      "end_labels": [
+        "Module"
+      ]
+    },
+    {
+      "type": "SATISFIES",
+      "count": 13334,
+      "start_labels": [
+        "Requirement"
+      ],
+      "end_labels": [
+        "Class",
+        "Function",
+        "Module"
+      ]
+    },
+    {
+      "type": "HAS_CHUNK",
+      "count": 22531,
+      "start_labels": [
+        "Module"
+      ],
+      "end_labels": [
+        "SourceChunk"
+      ]
+    }
+  ],
+  "indexes_created": [
+    {
+      "label": "Function",
+      "property": "uid"
+    },
+    {
+      "label": "Class",
+      "property": "uid"
+    },
+    {
+      "label": "Module",
+      "property": "uid"
+    },
+    {
+      "label": "Variable",
+      "property": "uid"
+    },
+    {
+      "label": "Type",
+      "property": "uid"
+    },
+    {
+      "label": "Concept",
+      "property": "uid"
+    },
+    {
+      "label": "Requirement",
+      "property": "uid"
+    },
+    {
+      "label": "API",
+      "property": "uid"
+    },
+    {
+      "label": "Document",
+      "property": "uid"
+    },
+    {
+      "label": "Function",
+      "property": "name"
+    },
+    {
+      "label": "Function",
+      "property": "file"
+    },
+    {
+      "label": "Class",
+      "property": "name"
+    },
+    {
+      "label": "Module",
+      "property": "path"
+    },
+    {
+      "label": "Document",
+      "property": "path"
+    },
+    {
+      "label": "Requirement",
+      "property": "text"
+    },
+    {
+      "label": "SourceChunk",
+      "property": "uid"
+    },
+    {
+      "label": "SourceChunk",
+      "property": "source_file"
+    }
+  ]
+}

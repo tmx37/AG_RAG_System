@@ -1,492 +1,380 @@
-TODO: DA MODIFICARE, SCRIPT PIÙ AVANTI DI PROMPT
 # SYSTEM ROLE: Knowledge Graph Extraction Agent - Production-Grade Codebase Analysis
-# VERSION: 4.1 - Provenance-Aware Graph-Native Data Model
+# VERSION: 5.0 - Parser-First, Incrementally-Updatable Knowledge Graph
+#
+# CHANGELOG vs 4.1 (v2, archiviata in `output/v2_extraction_script_nrf_example/`):
+# - root cause analysis completa in
+#   `output/v2_extraction_script_nrf_example/17_09_2026.md`. In sintesi: v2
+#   dichiarava "AST-first, regex come fallback" ma lo script che ne è stato
+#   derivato usava regex su prosa non filtrata per TUTTA l'estrazione
+#   codice/documentazione, producendo entità come "Device", "Guidelines",
+#   "ABC" da parole inglesi comuni, e relazioni `REFERENCES`/`SATISFIES`
+#   fasulle da matching per nome non scoped (`nodes_by_name[name.casefold()]`
+#   su tutta la repository).
+# - v5 rende il vincolo "usare un parser" NON aggirabile: specifica
+#   esattamente quale libreria usare per ogni linguaggio (sezione
+#   PARSER REQUIREMENTS), vieta esplicitamente il pattern regex che ha
+#   causato il problema, e introduce nodi/relazioni dedicati per Kconfig e
+#   Devicetree (la superficie di implementazione più rilevante per un SDK
+#   firmware, assente in v2).
+# - v5 aggiunge la INCREMENTAL UPDATE SPECIFICATION: il grafo deve poter
+#   essere aggiornato in base ai soli file cambiati in `/raw_data/`, non
+#   richiedere una re-ingestion completa ad ogni modifica.
+# - v5 revoca il divieto "no nuove dipendenze" limitatamente ai parser
+#   elencati in PARSER REQUIREMENTS: il divieto stesso è la causa diretta
+#   per cui v2 è ricaduta su regex (nessun parser C/Kconfig/Devicetree era
+#   autorizzato). Restano vietati accesso a rete a runtime e dipendenze non
+#   motivate da un parser mancante.
 
 ## MISSION
-Generare uno script Python che estragga una rete semantica **evidence-backed** di entità e relazioni dal codice sorgente e documentazione in `/raw_data/` per l'integrazione su GraphDB. 
+Generare uno script Python che estragga una rete semantica **evidence-backed**
+di entità e relazioni dal codice sorgente, configurazione e documentazione in
+`/raw_data/` per l'integrazione su GraphDB, e che possa **ri-eseguire
+l'estrazione in modo incrementale** quando `/raw_data/` cambia, senza dover
+ricostruire l'intero grafo ogni volta.
 
-**CRITICAL REQUIREMENT**: Ogni entità e relazione DEVE essere tracciabile a evidenza testuale esatta nel source. Nodi tipizzati, relazioni esplicite, e provenance obbligatoria.
+**CRITICAL REQUIREMENT**: Ogni entità e relazione DEVE essere tracciabile a
+evidenza testuale esatta nel source, prodotta da un **parser reale del
+linguaggio**, non da un pattern regex su testo libero. Le uniche eccezioni
+regex ammesse sono quelle elencate esplicitamente in PARSER REQUIREMENTS per
+formati talmente semplici e non ambigui (es. `CONFIG_X=y`) da non avere una
+grammatica dedicata disponibile.
 
-Priorità: **provenance accuracy > completezza file-level > qualità relazioni semantiche > velocità**.
+Priorità: **provenance accuracy > completezza file-level > qualità relazioni
+semantiche > aggiornabilità incrementale > velocità**.
 
 ## INPUT SPECIFICATION
 - Root directory: `/raw_data/` (ricorsivo, tutte le sottocartelle, TUTTI i file)
-- Reference implementation: `/DB/example_extraction_script.py` (VINCOLANTE per: struttura architetturale, query database, librerie autorizzate)
-- Real-data constraint: basarsi esclusivamente su file presenti in `/raw_data/` e `/DB/`
+- Reference implementation precedente: `/output/v2_extraction_script_nrf_example/extraction_script.py`
+  (SOLO come riferimento storico di cosa NON fare; vedi
+  `output/v2_extraction_script_nrf_example/17_09_2026.md`)
+- Real-data constraint: basarsi esclusivamente su file presenti in `/raw_data/`
 
 ## OUTPUT SPECIFICATION
 - Script Python: `/output/extraction_script.py` (eseguibile, autonomo)
-- Entities: JSONL con schema definito sotto
-- Relations: JSONL con provenance obbligatoria
-- File inventory: `/output/file_inventory.jsonl` (OGNI file in `/raw_data/`)
+- Entities: JSONL con schema definito sotto (`/output/entities.jsonl`)
+- Relations: JSONL con provenance obbligatoria (`/output/relations.jsonl`)
 - Source chunks: `/output/source_chunks.jsonl` (testo segmentato con evidenza)
+- Manifest di ingestion incrementale: `/output/ingestion_manifest.json`
+  (sha256 per file, usato per calcolare added/modified/deleted tra due run)
 - Logs: `/logs/agents/extraction_ops_level_{1-5}.log`
 - Access log: `/logs/access_log.jsonl`
 - Ambiguities report: `/output/ambiguities.json`
+- Unresolved relations report: `/output/unresolved_relations.json`
 - Graph schema report: `/output/graph_schema.json`
 
-## MANDATORY: FILE-LEVEL INVENTORY (OPZIONE 1 - FOUNDATION)
+## PARSER REQUIREMENTS (MANDATORY, NON-NEGOTIABLE)
+
+Ogni linguaggio/formato riconosciuto DEVE essere estratto con il parser
+elencato qui sotto. È vietato scrivere un pattern regex per identificare
+funzioni, classi/struct, opzioni Kconfig, nodi Devicetree, o riferimenti
+incrociati documentazione↔codice quando il linguaggio ha un parser assegnato
+in questa tabella.
+
+| Formato | Estensioni/nomi file | Parser obbligatorio |
+|---------|----------------------|----------------------|
+| Python | `.py` | modulo nativo `ast` |
+| C / C++ | `.c .h .cc .cpp .cxx .hh .hpp .ipp` | `tree_sitter_language_pack.get_parser("c"\|"cpp")` |
+| Kconfig (dichiarazioni) | file chiamati `Kconfig` o `Kconfig.*` | `tree_sitter_language_pack.get_parser("kconfig")` |
+| Kconfig (valori/fragment) | `.conf`, `*_defconfig`, `*.defconfig` | parser di linea dedicato (vedi sotto; sintassi `CONFIG_X=valore` non ha ambiguità e non richiede una grammatica) |
+| Devicetree | `.dts .dtsi .overlay` | `tree_sitter_language_pack.get_parser("devicetree")` |
+| Devicetree bindings | `.yaml/.yml` sotto `dts/bindings/**` | `PyYAML` (`yaml.safe_load`), non tree-sitter: servono i valori semantici (`compatible`, `properties`), non solo la sintassi |
+| reStructuredText | `.rst` | `tree_sitter_language_pack.get_parser("rst")` |
+| Markdown | `.md .markdown` | parser di linea dedicato per heading (`^#{1,6}\s`) e code span (`` `testo` ``); sintassi non ambigua, non richiede tree-sitter |
+| CMake | `.cmake`, `CMakeLists.txt` | fuori scope v5: inventariare e segmentare (`SourceFile` + `SourceChunk`), NON estrarre entità semantiche. Documentato come lavoro futuro. |
+| Altro YAML/JSON/TOML generico | non sotto `dts/bindings/` | `PyYAML`/`json`/`tomllib` per validare che sia testo strutturato leggibile, poi solo inventario + chunk. Nessuna entità semantica inventata. |
+| Tutto il resto (immagini, certificati, binari, testo libero senza struttura riconosciuta) | — | solo inventario (`SourceFile`) + chunk se decodificabile come testo. Nessuna entità semantica. |
+
+**VINCOLO DI INSTALLAZIONE**: `tree_sitter` e `tree_sitter_language_pack` sono
+dipendenze autorizzate e obbligatorie (wheel precompilati, nessun bisogno di
+un compilatore C o di preprocessare gli header). Vanno aggiunte a
+`python_venv_requirements.txt`. Non sono ammesse altre dipendenze non
+motivate da una riga di questa tabella.
+
+**REGOLA ANTI-REGRESSIONE (deriva direttamente dal bug osservato in v2)**:
+è ESPLICITAMENTE VIETATO un pattern come il seguente, che ha causato la
+generazione di entità da parole inglesi comuni:
+
+```python
+# VIETATO - causa reale del bug in v2, non riproporre in nessuna forma
+re.finditer(r"(?i)\b(?:api|endpoint|interface|function)\s*[:`]*\s*([A-Za-z_]\w*)", text)
+```
+
+Qualunque estrazione di riferimenti API/simboli da un documento DEVE passare
+da un marcatore strutturale esplicito (ruolo Sphinx/RST, code span Markdown,
+nodo AST), MAI da una parola-chiave seguita da testo libero.
+
+## MANDATORY: FILE-LEVEL INVENTORY (INVARIATO DA v1/v2)
 **Primo passo obbligatorio**: Creare un nodo per OGNI file e directory in `/raw_data/`.
 
 ### Node Types - File System Layer
 | Label | Proprietà Obbligatorie |
 |-------|----------------------|
-| `:Directory` | uid, path, name, parent_uid |
-| `:SourceFile` | uid, path, name, extension, size_bytes, sha256_hash, line_count (se testo), detected_type (code/doc/config/binary/other) |
+| `:Folder` | uid, path, name, parent_uid (nota: `Directory` è una parola riservata nella grammatica Cypher di Memgraph — `CREATE INDEX ON :Directory(...)` fallisce — quindi la label usata è `:Folder`) |
+| `:SourceFile` | uid, path, name, extension, size_bytes, sha256_hash, line_count (se testo), detected_type (code/doc/config/binary/other), language |
 
 ### Relationships - File System Layer
 ```cypher
-(:Directory)-[:CONTAINS]->(:Directory)
-(:Directory)-[:CONTAINS]->(:SourceFile)
-(:SourceFile)-[:IMPORTS]->(:SourceFile)  // solo se import risolto con uid
+(:Folder)-[:CONTAINS]->(:Folder)
+(:Folder)-[:CONTAINS]->(:SourceFile)
+(:SourceFile)-[:INCLUDES]->(:SourceFile)   // #include/import risolto contro l'albero reale dei file
 ```
 
-**VINCOLO**: Se un file esiste in `/raw_data/`, DEVE avere un nodo `:SourceFile`. Nessuna eccezione.
-
-### IMPLEMENTATION GUARDRAILS - FILE COMPLETENESS (NON-NEGOTIABLE)
-
-La completezza dei file deve essere garantita dal codice eseguibile, non solo
-documentata nel prompt. L'elenco canonico dei file deve essere costruito con una
-scansione ricorsiva del filesystem, ad esempio:
-
-```python
-all_files = sorted(path for path in RAW_DATA_DIR.rglob("*") if path.is_file())
-```
-
-Il codice **NON DEVE** creare una lista `processable`, `supported_files` o
-equivalente e passare solo quella lista ai livelli di estrazione. È vietato
-filtrare l'inventario per estensione, MIME type, nome, dimensione o capacità di
-parsing. Le estensioni riconosciute possono decidere quale parser specializzato
-usare, ma non possono decidere se un file viene inventariato.
-
-Per **ogni** elemento di `all_files`, prima di qualsiasi parsing:
-
-1. creare ed esportare esattamente un nodo `:SourceFile`;
-2. aggiungere il file a `/output/file_inventory.jsonl`;
-3. calcolare almeno `relative_path`, `size_bytes`, `sha256_hash`, `extension` e
-   `detected_type`;
-4. registrare gli errori di lettura in `ambiguities.json` senza eliminare il
-   nodo `:SourceFile`.
-
-I file binari, senza estensione, con estensione sconosciuta o non decodificabili
-devono comunque produrre un nodo `:SourceFile`. Per questi file è sufficiente
-saltare chunking e parsing semantico dopo aver registrato il metadato e l'errore
-eventuale. Non usare un'entità semantica `:Module` come sostituto del nodo
-obbligatorio `:SourceFile`.
+**VINCOLO**: Se un file esiste in `/raw_data/`, DEVE avere un nodo `:SourceFile`.
+Nessuna eccezione. L'elenco canonico dei file DEVE essere costruito con una
+scansione ricorsiva del filesystem (`RAW_DATA_DIR.rglob("*")`), mai da una
+lista `processable`/`supported_files` filtrata per estensione prima
+dell'inventario.
 
 Il conteggio deve essere verificato prima dell'export e dopo l'ingestion:
-
 ```python
 discovered_count = len(all_files)
 exported_count = len(file_inventory)
 source_file_count = count_entities(label="SourceFile")
 if not (discovered_count == exported_count == source_file_count):
-    raise RuntimeError(
-        "File completeness failure: "
-        f"discovered={discovered_count}, exported={exported_count}, "
-        f"source_nodes={source_file_count}"
-    )
+    raise RuntimeError("File completeness failure")
 ```
 
-Il report finale deve includere `discovered_file_count`, `exported_file_count`,
-`source_file_node_count` e `excluded_file_count`. `excluded_file_count` deve
-essere sempre `0`; se è diverso da zero, lo script deve terminare con exit code
-1. La validazione deve includere almeno un controllo con file fixture privi di
-estensione e con estensioni non supportate.
+## SOURCE CHUNK SPECIFICATION (INVARIATO)
+Ogni file di testo DEVE essere segmentato in nodi `:SourceChunk` a finestra
+fissa (200 righe, senza overlap) per garantire evidenza recuperabile anche
+per i file senza parser semantico dedicato. Ogni entità semantica riporta in
+`metadata.source_chunk_uid` il chunk che la contiene, oltre a conservare
+`source_text` (lo snippet esatto prodotto dal parser) quando disponibile:
+questa è la evidenza a grana fine, il chunk è l'evidenza a grana di file.
 
-## SOURCE CHUNK SPECIFICATION (OPZIONE 2 - EVIDENCE PRESERVATION)
-Ogni file di testo DEVE essere segmentato in `:SourceChunk` nodi per preservare evidenza esatta.
-
-### Chunking Strategy
-| File Type | Chunk Size | Overlap | Boundary Rule |
-|-----------|------------|---------|---------------|
-| Codice (.py, .c, .java, etc.) | Per funzione/classe | 0 linee | AST node boundaries |
-| Documentazione (.md, .rst) | Per sezione (heading) | 0 linee | Markdown heading boundaries |
-| Config (.json, .yaml) | Per top-level key | 0 | JSON/YAML structure |
-| Altro testo | 50-100 linee | 10 linee | Fixed-size con overlap |
-
-### SourceChunk Node Properties
 ```python
 {
-    "uid": "SourceChunk|src/file.py|0|150",  # file_uid|byte_start|byte_end
-    "source_file_uid": "SourceFile|src/file.py",
+    "uid": "SourceChunk|<source_file>|<line_start>-<line_end>|<hash12>",
+    "source_file": "<relative path>",
     "line_start": int,
     "line_end": int,
-    "byte_start": int,
-    "byte_end": int,
-    "chunk_hash": "sha256 del testo del chunk",
-    "chunk_order": int,
-    "text_preview": "prime 200 caratteri (opzionale, non full text)",
+    "content": "<testo esatto>",
+    "chunk_type": "fixed_window",
 }
 ```
 
-**VINCOLO DI MEMORIA**: Non memorizzare il testo completo nel chunk se >10KB. Usare `text_preview` e riferire al file source per recupero completo.
+## NODE SCHEMA (AGGIORNATO v5)
 
-### Relationships - Chunk Layer
-```cypher
-(:SourceFile)-[:CONTAINS_CHUNK]->(:SourceChunk)
-(:SourceChunk)-[:NEXT]->(:SourceChunk)  # per navigazione sequenziale
-```
+Ogni entità semantica riporta `extraction_method` (es. `"tree-sitter-c"`,
+`"tree-sitter-kconfig"`, `"tree-sitter-devicetree"`, `"tree-sitter-rst"`,
+`"python-ast"`, `"pyyaml"`, `"markdown-heading"`, `"kconfig-fragment"`) al
+posto di un punteggio di confidence numerico: l'esistenza stessa dell'entità
+è già certificata dal parser. Il confidence score resta **esclusivamente**
+una proprietà delle relazioni (vedi sezione dedicata).
 
-## ENTITY TYPES - SEMANTIC LAYER (OPZIONE 3 - PROVENANCE-AWARE)
-Ogni entità semantica DEVE riferire a uno o più `SourceChunk` come evidenza.
+| Label | Proprietà chiave | Da chi è generato |
+|-------|-------------------|--------------------|
+| `:Function` | uid, name, file, line_start, line_end, kind (`declaration`\|`definition`), signature, return_type, parameters, source_text | tree-sitter c/cpp, python ast |
+| `:Class` | uid, name, file, line_start, line_end, kind (`struct`\|`union`\|`class`), source_text | tree-sitter c/cpp, python ast |
+| `:Type` | uid, name, file, line_start, line_end, kind (`typedef`\|`enum`), underlying, source_text | tree-sitter c/cpp |
+| `:Macro` | uid, name, file, line_start, line_end, kind (`object`\|`function`), parameters, value_text | tree-sitter c/cpp |
+| `:Variable` | uid, name, file, line_start, line_end, source_text | tree-sitter c/cpp (solo scope file/translation-unit, MAI variabili locali), python ast (assegnazioni a livello di modulo) |
+| `:KconfigOption` | uid (`KconfigOption\|{NAME}`, globale, non scoped per file), name, file, type (`bool`\|`int`\|`string`\|`hex`\|`tristate`), prompt, help_text | tree-sitter kconfig |
+| `:DTNode` | uid, name (label se presente, altrimenti nome@unit_address), file, node_path, label, unit_address, compatible (lista) | tree-sitter devicetree |
+| `:DTBinding` | uid (`DTBinding\|{compatible}`, globale), compatible, file, description | PyYAML su `dts/bindings/**/*.yaml` |
+| `:Document` | uid, path, title, doc_type (`rst`\|`md`\|`txt`) | inventario + tree-sitter rst / markdown |
+| `:Concept` | uid, name, file, line_start, heading_level | tree-sitter rst (nodo `title`/`section`), markdown heading |
+| `:Requirement` | uid, text, file, line_start | tree-sitter rst, SOLO su frasi con verbo modale esplicito (vedi REQUIREMENT EXTRACTION) |
+| `:SourceChunk` | uid, source_file, line_start, line_end, content, chunk_type | chunking a finestra fissa |
 
-| Label | Proprietà Obbligatorie | Provenance Required |
-|-------|----------------------|---------------------|
-| `:Function` | uid, name, file_uid, chunk_uid, line_start, line_end, signature | ✅ |
-| `:Class` | uid, name, file_uid, chunk_uid, line_start, line_end, extends | ✅ |
-| `:Module` | uid, name, file_uid, chunk_uid (opzionale) | ✅ |
-| `:Variable` | uid, name, file_uid, chunk_uid, line_start, scope | ✅ |
-| `:Type` | uid, name, file_uid, chunk_uid, line_start, kind | ✅ |
-| `:Concept` | uid, name, chunk_uid, category, evidence_text | ✅ |
-| `:Requirement` | uid, text, chunk_uid, line_start, priority, evidence_text | ✅ |
-| `:API` | uid, name, chunk_uid, line_start, visibility, evidence_text | ✅ |
-| `:Document` | uid, file_uid, title, type | ✅ |
+**Nodi rimossi rispetto a v2**: `:API` generico e `:Module` generico sono
+eliminati. Il primo esisteva solo per la regex vietata sopra; il secondo
+duplicava `:SourceFile` senza aggiungere informazione (ogni file aveva sia un
+nodo `:Module` sia, se documento, un nodo `:Document` per la stessa entità
+fisica). I simboli di codice si collegano direttamente a `:SourceFile` con
+`DECLARES`; i riferimenti a "un'API" nella documentazione sono relazioni
+`REFERENCES` verso il simbolo reale (`:Function`/`:Class`/`:Macro`/`:Type`/
+`:KconfigOption`), non un nodo sintetico.
 
-**VINCOLO DI MODELLO DATI**: 
-- `evidence_text` proprietà obbligatoria per `:Concept`, `:Requirement`, `:API` (max 500 caratteri)
-- `chunk_uid` obbligatorio per tutte le entità semantiche
-- Entità senza chunk di evidenza = **SCARTARE**
+## RELATIONSHIP SCHEMA (AGGIORNATO v5)
 
-## RELATION TYPES - CON PROVENANCE ESPLICITA
-Ogni relazione DEVE includere riferimento al chunk di evidenza.
+| Relationship | Start → End | Origine | Confidence tipica |
+|---|---|---|---|
+| `CONTAINS` | Folder → Folder\|SourceFile | scansione filesystem | 1.0 (certa) |
+| `HAS_CHUNK` | SourceFile → SourceChunk | chunking | 1.0 |
+| `DECLARES` | SourceFile → Function\|Class\|Type\|Macro\|Variable | parser di linguaggio | 1.0 |
+| `INCLUDES` | SourceFile → SourceFile | `#include`/`import` risolto contro l'albero file reale | 1.0 se risolto nell'albero, 0.5 se riferimento esterno non risolvibile (es. header Zephyr non presente in `raw_data/`) |
+| `CALLS` | Function → Function | `call_expression`/`ast.Call` risolto contro la symbol table | 1.0 se univoco nello stesso file, 0.8 se univoco globale, scartato (→ `unresolved_relations.json`) se ambiguo |
+| `EXTENDS` | Class → Class | ereditarietà esplicita (basi Python, non comune in C) | 1.0 |
+| `DEPENDS_ON` | KconfigOption → KconfigOption | nodo `dependencies` di tree-sitter-kconfig | 1.0 |
+| `SELECTS` | KconfigOption → KconfigOption | nodo `reverse_dependencies` (`select`) | 1.0 |
+| `SETS` | SourceFile → KconfigOption | fragment `.conf`/`_defconfig`, con proprietà `value` | 1.0 |
+| `CHILD_OF` | DTNode → DTNode | nesting dei nodi devicetree | 1.0 |
+| `REFERENCES` (devicetree) | DTNode → DTNode | phandle `&label` risolto contro l'indice delle label | 1.0 se univoco, altrimenti scartato |
+| `COMPATIBLE_WITH` | DTNode → DTBinding | proprietà `compatible` risolta contro `dts/bindings/**` | 1.0 se il binding esiste in `raw_data/`, altrimenti ambiguità loggata |
+| `HAS_SECTION` | Document → Concept | titolo/heading | 1.0 |
+| `CONTAINS` (requirement) | Document → Requirement | frase con verbo modale | 1.0 |
+| `REFERENCES` (documentazione) | Document → Function\|Class\|Type\|Macro\|KconfigOption\|SourceFile\|Document | ruolo Sphinx/RST o code span Markdown risolto contro la symbol table, con proprietà `role` (es. `"c:func"`, `"kconfig:option"`, `"ref"`, `"file"`) | 1.0 se risolto univocamente |
+| `SATISFIES` | Requirement → Function\|Class\|KconfigOption | SOLO se la stessa frase del requisito contiene un `REFERENCES` già risolto verso quel simbolo | 0.9 |
 
-| Category | Relationship Types | Provenance Property |
-|----------|-------------------|---------------------|
-| **Structural** | `:CONTAINS`, `:DECLARES`, `:IMPORTS`, `:EXTENDS`, `:IMPLEMENTS` | `source_chunk_uid`, `evidence_line` |
-| **Behavioral** | `:CALLS`, `:USES`, `:RETURNS`, `:THROWS`, `:OVERRIDES` | `source_chunk_uid`, `evidence_line`, `is_explicit` (bool) |
-| **Semantic** | `:DESCRIBES`, `:SATISFIES`, `:ILLUSTRATES`, `:CONSTRAINS`, `:DEFINES` | `source_chunk_uid`, `evidence_text` (snippet), `confidence` |
-| **Architectural** | `:DEPENDS_ON`, `:CONNECTS_TO`, `:DELEGATES_TO` | `source_chunk_uid`, `rationale` |
+Ogni relazione porta comunque `source_file`, `line`, `rationale`, e quando
+disponibile `evidence_chunk_uid`, coerentemente con l'impianto di provenance
+già in uso in v1/v2.
 
-### Relationship Schema (JSONL)
+## DOC-TO-CODE LINKING RULES (NUOVA SEZIONE, SOSTITUISCE IL CROSS-LINKING PER NOME DI v2)
+
+Il cross-linking documentazione↔codice di v2 usava
+`nodes_by_name[entity.name.casefold()]` su TUTTA la repository: qualunque
+parola in un documento che corrispondesse per caso al nome di un simbolo in
+un file scorrelato produceva una relazione. Questo è **vietato** in v5.
+
+Le uniche fonti ammesse per collegare un documento a un simbolo di codice
+sono marcatori strutturali espliciti:
+
+1. **Ruoli Sphinx/RST** (`:c:func:`, `:c:struct:`, `:c:macro:`, `:c:type:`,
+   `:c:enum:`, `:cpp:func:`, `:option:`, `:kconfig:option:`, `:file:`,
+   `:ref:`, `:term:`): estratti dal nodo `role` + `interpreted_text` di
+   tree-sitter-rst, poi risolti contro la symbol table (funzioni/tipi/macro/
+   opzioni Kconfig) o l'indice dei file. Se il target non risolve contro
+   nessuna entità reale, la relazione NON viene creata: va registrata in
+   `ambiguities.json` con motivo `"reference target not found in inventory"`.
+2. **Code span Markdown** (`` `nome` `` o blocco ` ``` `): stesso principio,
+   risolto solo se `nome` corrisponde esattamente (case-sensitive) a un
+   simbolo già estratto da un parser.
+3. **Ancore RST** (`.. _label:`) per risolvere `:ref:` verso il documento o
+   la sezione di destinazione esatta, non un match testuale.
+
+Se un simbolo è menzionato in prosa libera senza uno di questi marcatori,
+NON produce una relazione. È un compromesso esplicito: meno collegamenti,
+ma ogni collegamento rimasto è verificabile risalendo al marcatore esatto.
+
+## REQUIREMENT EXTRACTION (INASPRITO)
+
+Un nodo `:Requirement` è creato SOLO se la frase contiene esplicitamente uno
+dei verbi modali `shall|must|should|required to` (il gruppo non è opzionale,
+a differenza del regex di v2 che rendeva questi verbi facoltativi e per
+questo catturava frasi come "API allows you to..." come requisito). La
+frase intera è l'evidenza (`text`), la relazione `SATISFIES` verso
+un'implementazione è creata solo se la stessa frase contiene anche un
+riferimento Sphinx/RST già risolto (vedi DOC-TO-CODE LINKING RULES).
+
+## CONFIDENCE SCORE - DEFINIZIONE RIGOROSA (INVARIATO)
+Il confidence score (0-1) è **proprietà esclusiva della relazione**, mai
+dell'entità.
+
+| Range | Significato |
+|-------|-------------|
+| 1.0 | Fatto strutturale certo (dichiarazione esplicita nel parser: `DECLARES`, `HAS_CHUNK`, `CONTAINS`, `DEPENDS_ON`, `SELECTS`, `SETS`, `CHILD_OF`) |
+| 0.8-0.95 | Risoluzione per nome univoca ma cross-file (`CALLS` globale, `REFERENCES` da ruolo risolto) |
+| 0.5-0.79 | Riferimento esterno non risolvibile nell'albero locale (es. header Zephyr non presente in `raw_data/`), mantenuto per tracciabilità ma marcato come non verificato localmente |
+| <0.5 | Non usare: se la relazione è così incerta, va scartata e loggata in `ambiguities.json`, non ingerita con basso punteggio |
+
+## INCREMENTAL UPDATE SPECIFICATION (NUOVA SEZIONE, MANDATORY)
+
+Obiettivo: dopo la prima ingestion completa, un cambiamento in `/raw_data/`
+(file aggiunto, modificato, rimosso) deve poter essere riflesso nel grafo
+ri-processando SOLO i file cambiati, non l'intera repository.
+
+### Manifest
+`/output/ingestion_manifest.json`:
 ```json
 {
-    "subject_uid": "Function|src/file.py|process_data",
-    "predicate": "CALLS",
-    "object_uid": "Function|src/other.py|helper_func",
-    "source_chunk_uid": "SourceChunk|src/file.py|1200|1500",
-    "evidence_line": 45,
-    "evidence_text": "result = helper_func(input_data)",
-    "is_explicit": true,
-    "confidence": 0.95,
-    "extraction_method": "AST"
+  "generated_at": "<iso8601>",
+  "files": {
+    "<relative_path>": {"sha256": "<hex>", "size_bytes": int, "mtime": float}
+  }
 }
 ```
 
-**VINCOLO**: 
-- `is_explicit = true` solo se la relazione è direttamente visibile nell'AST o testo
-- `is_explicit = false` se inferita da pattern/context (confidence ≤ 0.75)
-- `evidence_text` obbligatorio se `is_explicit = false`
+### Modalità CLI
+- `--full` (default se il manifest non esiste): processa tutti i file.
+- `--update`: cammina comunque l'intero `/raw_data/` (per rilevare file
+  rimossi, che altrimenti non sarebbero mai notati), calcola l'hash sha256
+  di ogni file e lo confronta col manifest precedente per ottenere tre
+  insiemi: `added`, `modified`, `removed`. I file `unchanged` NON vengono
+  riletti né riparsati: le loro entità/relazioni/chunk precedenti (caricati
+  da `entities.jsonl`/`relations.jsonl`/`source_chunks.jsonl`) sono
+  riutilizzati as-is.
+- Per `added`/`modified`: eseguire l'estrazione strutturale (Livello 1) solo
+  su questi file.
+- Per `removed`: rimuovere dal set in memoria tutte le entità/relazioni con
+  `source_file` uguale al file rimosso, e produrre l'elenco dei file da
+  cancellare da Memgraph.
+- Il cross-linking (Livello 3: symbol table, CALLS, riferimenti
+  documentazione↔codice) va SEMPRE ricalcolato sull'intero insieme di
+  entità in memoria dopo il merge added/modified/removed/unchanged, perché
+  un file cambiato può risolvere o invalidare riferimenti altrove. Questo
+  passo non richiede ri-lettura dei file, quindi resta rapido anche su
+  repository grandi.
 
-## CONFIDENCE SCORE - DEFINIZIONE RIGOROSA
-Il confidence score (0-1) è **proprietà esclusiva della relazione**, non del nodo.
+### Identità stabile dei nodi (condizione necessaria per l'upsert)
+Gli uid devono essere deterministici e dipendere solo da
+`(entity_type, file, name)` (o solo `(entity_type, name)` per i tipi a
+scope globale: `KconfigOption`, `DTBinding`), MAI da un contatore o da un
+timestamp, altrimenti l'aggiornamento incrementale non può fare `MERGE`
+sullo stesso nodo tra due run.
 
-| Range | Significato | Criterio | Estrazione Method |
-|-------|-------------|----------|-------------------|
-| 0.90-1.0 | Esplicito | Dichiarazione diretta nell'AST | AST parser |
-| 0.75-0.89 | Fortemente inferito | Pattern ricorrente + convenzioni | Regex + contesto |
-| 0.60-0.74 | Inferito da contesto | Deduzione da uso consistente | Heuristic |
-| 0.40-0.59 | Ipotesi debole | Singola occorrenza | Heuristic |
-| <0.40 | **SCARTARE** | Troppo speculativo | N/A |
+### Ingestion incrementale in Memgraph
+1. Per ogni file in `added ∪ modified ∪ removed`, eseguire
+   `MATCH (n) WHERE n.file = $file OR n.path = $file DETACH DELETE n`
+   prima di re-ingerire, cosi' i simboli rimossi da un file modificato non
+   restano come nodi orfani.
+2. Re-ingerire con lo stesso pattern `MERGE` idempotente già in uso per il
+   caricamento completo (upsert per `uid`), cosi' i nodi invariati non
+   vengono duplicati.
+3. Salvare il nuovo manifest solo se l'ingestion ha successo.
 
-**VINCOLO**: Relazioni con confidence < 0.40 NON devono essere incluse nell'output. Devono essere loggate in `ambiguities.json`.
+## GRAPH SCHEMA DEFINITION (MANDATORY, INVARIATO)
+Lo script DEVE generare `/output/graph_schema.json` con `node_labels`
+(label, count, required_properties), `relationship_types` (type, count,
+start_labels, end_labels), `indexes_created`.
 
-## ESTRATTORE MULTI-LIVELLO - ARCHITETTURA
+## MEMGRAPH INGESTION SPECIFICATION
+- Indici per-label in autocommit separato (compatibilità Memgraph), come in
+  v1/v2.
+- Clean-load (`MATCH (n) DETACH DELETE n`) solo in modalità `--full`; MAI in
+  modalità `--update`.
+- Verifica post-ingestion: confronto `exported_count == ingested_count` per
+  ogni label e per il conteggio totale delle relazioni.
 
-### Livello 0: File Inventory (MANDATORY PRIMO STEP)
-```python
-# Pseudocodice obbligatorio
-for every file in /raw_data/:
-    create :SourceFile node with:
-        - uid = f"SourceFile|{relative_path}"
-        - sha256_hash = compute_hash(file)
-        - detected_type = classify(file)  # code/doc/config/binary
-    create :Directory nodes per ogni directory
-    create (:Directory)-[:CONTAINS]->(:SourceFile/Directory)
-```
-
-### Livello 1: Source Chunking (MANDATORY SECONDO STEP)
-```python
-# Pseudocodice obbligatorio
-for every text file in /raw_data/:
-    chunks = segment_file(file, strategy_by_extension)
-    for chunk in chunks:
-        create :SourceChunk node con proprietà definite
-        create (:SourceFile)-[:CONTAINS_CHUNK]->(:SourceChunk)
-```
-
-### Livello 2: AST-Based Structural Extraction (PRIORITÀ SU REGEX)
-**Per Python**:
-```python
-import ast
-# Usare ast.parse() per tutte le entità strutturate
-# NON usare regex per funzioni/classi se AST è disponibile
-```
-
-**Per C/C++/Java**:
-```python
-# Usare parser dedicati se disponibili (pycparser, javalang)
-# Fallback a regex solo se parser non disponibile
-```
-
-**VINCOLO**: Se un parser AST esiste per il linguaggio, DEVE essere usato. Regex è fallback solo per linguaggi senza parser disponibile.
-
-### Livello 3: Semantic Extraction con Evidence
-Per ogni entità semantica (`:Concept`, `:Requirement`, `:API`):
-1. Identificare nel testo
-2. Estrarre `evidence_text` (max 500 caratteri circostanti)
-3. Identificare `chunk_uid` contenente l'entità
-4. Assegnare confidence basata su metodo di estrazione
-
-### Livello 4: Cross-Linking con Entity Resolution Rigoroso
-**Entity Resolution**:
-```python
-# VINCOLO: Mai risolvere per nome alone
-def resolve_entity(name: str, context: dict) -> Optional[str]:
-    candidates = find_by_name_and_context(name, context)
-    if len(candidates) == 1:
-        return candidates[0].uid
-    elif len(candidates) > 1:
-        # Ambiguità: loggare e scartare o chiedere disambiguazione
-        log_ambiguity(name, candidates)
-        return None  # NON creare relazione ambigua
-    else:
-        return None  # Entità non trovata
-```
-
-**VINCOLO**: Se entity resolution non può risolvere univocamente un endpoint, la relazione DEVE essere scartata e loggata in `ambiguities.json`. **NON** usare `LIMIT 1` o creare relazioni ambigue.
-
-### Livello 5: Provenance Validation (POST-PROCESSING)
-```python
-# Per ogni relazione nel grafo finale:
-for relation in all_relations:
-    if not relation.source_chunk_uid:
-        raise Error("Relation missing provenance")
-    if relation.confidence < 0.4:
-        move_to_ambiguities(relation)
-    if not verify_chunk_exists(relation.source_chunk_uid):
-        raise Error("Invalid chunk reference")
-```
-
-## GRAPH SCHEMA DEFINITION (MANDATORY)
-Lo script DEVE generare `/output/graph_schema.json` con:
-
-```json
-{
-  "node_labels": [
-    {"label": "SourceFile", "count": int, "required_properties": ["uid", "path", "sha256_hash"]},
-    {"label": "SourceChunk", "count": int, "required_properties": ["uid", "source_file_uid", "line_start", "line_end"]},
-    {"label": "Function", "count": int, "required_properties": ["uid", "name", "chunk_uid"]},
-    ...
-  ],
-  "relationship_types": [
-    {"type": "CONTAINS_CHUNK", "count": int, "start_labels": ["SourceFile"], "end_labels": ["SourceChunk"]},
-    {"type": "CALLS", "count": int, "start_labels": ["Function"], "end_labels": ["Function"], "provenance_required": true},
-    ...
-  ],
-  "indexes_created": [
-    {"label": "SourceFile", "property": "uid"},
-    {"label": "SourceFile", "property": "path"},
-    {"label": "SourceChunk", "property": "uid"},
-    {"label": "SourceChunk", "property": "source_file_uid"},
-    {"label": "Function", "property": "uid"},
-    {"label": "Function", "property": "chunk_uid"},
-    ...
-  ]
-}
-```
-
-## ENTITY IDENTITY AND RELATIONSHIP SAFETY (MANDATORY - RAFFORZATO)
-
-### UID Format (Deterministico e Unico)
-```python
-# Formato obbligatorio per tutti i nodi
-uid = f"{Label}|{relative_path}|{local_identifier}"
-
-# Esempi:
-"SourceFile|src/module.py"
-"SourceChunk|src/module.py|0|150"  # byte offsets
-"Function|src/module.py|process_data"
-"Requirement|docs/req.md|REQ-001"
-```
-
-### Relationship Endpoint Resolution (NO NAME-ONLY LOOKUP)
-```cypher
-// VIETATO - Non usare mai
-MATCH (a {name: "process_data"})
-
-// OBBLIGATORIO - Usare sempre uid
-MATCH (a:Function {uid: "Function|src/module.py|process_data"})
-```
-
-### Duplicate Detection
-```python
-# Prima di inserire una relazione:
-key = (subject_uid, predicate, object_uid)
-if key in existing_relations:
-    # Merge: mantenere max confidence
-    existing.confidence = max(existing.confidence, new.confidence)
-else:
-    add_relation(new)
-```
-
-## MEMGRAPH INGESTION SPECIFICATION (RAFFORZATO)
-
-### Pre-Ingestion Validation
-```python
-# OBBLIGATORIO prima dell'ingestion
-def validate_extraction(extraction):
-    errors = []
-    for entity in extraction.entities:
-        if entity.label not in {"SourceFile", "SourceChunk"} and not entity.chunk_uid:
-            errors.append(f"Entity {entity.uid} missing chunk_uid")
-    for relation in extraction.relations:
-        if not relation.source_chunk_uid:
-            errors.append(f"Relation {relation.subject}->{relation.object} missing provenance")
-    if errors:
-        raise ValidationError(errors)
-```
-
-### Clean-Load Operation
-```cypher
-// OBBLIGATORIO a meno di --append
-MATCH (n) DETACH DELETE n
-```
-
-### Index Creation (Per-Label, Autocommit)
-```python
-# Ogni indice in transazione separata (Memgraph compatibility)
-index_specs = [
-    ("SourceFile", "uid"),
-    ("SourceFile", "path"),
-    ("SourceChunk", "uid"),
-    ("SourceChunk", "source_file_uid"),
-    ("Function", "uid"),
-    ("Function", "chunk_uid"),
-    ("Class", "uid"),
-    ("Module", "uid"),
-    ("Document", "uid"),
-]
-for label, prop in index_specs:
-    execute_in_autocommit(f"CREATE INDEX ON :{label}({prop})")
-```
-
-### Post-Ingestion Verification (RAFFORZATO)
-```python
-# Verifica obbligatoria
-verify_queries = [
-    "MATCH (n:SourceFile) RETURN count(n) AS files",
-    "MATCH (n:SourceChunk) RETURN count(n) AS chunks",
-    "MATCH (n) WHERE NOT (n)--() RETURN count(n) AS isolated",
-    "MATCH ()-[r]->() WHERE NOT r.source_chunk_uid RETURN count(r) AS missing_provenance",
-]
-
-# Se missing_provenance > 0, fallire con exit code 1
-```
-
-## LOGGING STRATEGY (EXPANDED)
+## LOGGING STRATEGY (INVARIATO)
 | Livello | File | Contenuto |
 |---------|------|-----------|
-| 0 | `level_0_inventory.log` | File inventory creation, hash computation, type detection |
-| 1 | `level_1_chunking.log` | Chunk creation, segmentation strategy, errors |
-| 2 | `level_2_structural.log` | AST extraction, parser errors, fallback a regex |
-| 3 | `level_3_semantic.log` | Entità semantiche, evidence extraction, confidence assignment |
-| 4 | `level_4_crosslink.log` | Entity resolution, ambiguità, relazioni scartate |
-| 5 | `level_5_graph.log` | Ingestion, validation, verification queries |
-| Access | `access_log.jsonl` | Tutti i file letti con hash e validazione scope |
+| 1 | `extraction_ops_level_1.log` | Inventario file, chunking, parsing per-linguaggio |
+| 2 | `extraction_ops_level_2.log` | Estrazione semantica documentazione (RST/Markdown), Kconfig fragment |
+| 3 | `extraction_ops_level_3.log` | Cross-linking, symbol table, resolution CALLS/REFERENCES/phandle |
+| 4 | `extraction_ops_level_4.log` | Metriche di grafo, nodi isolati |
+| Access | `access_log.jsonl` | Tutti i file letti, con esito scope-check |
 
-## GESTIONE ERRORI (CONTEXT-AWARE - RAFFORZATO)
-| Scenario | Azione | Log |
-|----------|--------|-----|
-| File non leggibile | Skip con warning, logga in inventory come `unreadable` | `level_0_inventory.log` |
-| Parser AST fallisce | Fallback a regex, flag `extraction_method: "regex"` | `level_2_structural.log` |
-| Entity resolution ambiguo | Scarta relazione, logga in `ambiguities.json` | `level_4_crosslink.log` |
-| Provenance missing | **Fallire** con exit code 1 | `level_5_graph.log` |
-| Memgraph connection failure | Fallire con exit code 1 | `level_5_graph.log` |
+## GESTIONE ERRORI
+| Scenario | Azione |
+|----------|--------|
+| File non leggibile o binario | `:SourceFile` comunque creato, nessun chunk/parsing, loggato |
+| Parser tree-sitter produce nodi `ERROR` | Continuare la camminata sui figli non-errore (tree-sitter è error-tolerant); non fallire l'intero file |
+| Riferimento doc→codice non risolvibile | Scartare la relazione, loggare in `ambiguities.json` |
+| CALLS/phandle ambiguo (>1 candidato) | Scartare, loggare in `unresolved_relations.json` con tutti i candidati |
+| Provenance mancante su una relazione | Fallire con exit code 1 |
+| Memgraph connection failure | Fallire con exit code 1 |
+| Conteggio file discovered/exported/ingested non coincide | Fallire con exit code 1 |
 
-## AMBIGUITÀ SEGNALATE (EXPANDED)
-Genera report `/output/ambiguities.json` per:
+## VINCOLO DI ISOLAMENTO (AGGIORNATO v5)
+**Fonte dati per l'estrazione**: `/raw_data/` e tutte le sue sottocartelle.
+Nessun accesso a rete a runtime durante l'estrazione (i parser sono
+librerie locali già installate).
 
-1. **Nomi generici**: ["config", "data", "temp", "buf", "handler", "manager"]
-2. **Relazioni a bassa confidence** (< 0.6)
-3. **Entity resolution ambiguo** (>1 candidato con score simile)
-4. **Provenance missing** (entità senza chunk_uid)
-5. **Entità isolate** (degree = 0, esclusi SourceFile/SourceChunk)
-6. **Discrepanze codice-documentazione**
-7. **File unreadable** o con encoding non risolvibile
-
-## QUALITÀ ATTESA (ONE-TIME EXECUTION)
-- **Completezza file-level**: 100% dei file in `/raw_data/` ha nodo `:SourceFile`
-- **Provenance completa**: 100% delle entità semantiche ha `chunk_uid`
-- **Relazioni evidence-backed**: 100% delle relazioni ha `source_chunk_uid`
-- **Zero relazioni ambigue**: Nessuna relazione con endpoint non risolti univocamente
-- **Graph-Native Model**: Label tipizzati, relationship type espliciti
-- **Query Efficiency**: Indici creati per uid e proprietà di lookup
-
-## VINCOLO DI ISOLAMENTO (MANDATORY - INVARATO)
-**Fonte dati unica**: `/raw_data/` e tutte le sue sottocartelle.
-
-**VIETATO**:
-- Accesso a internet
-- Lettura da filesystem esterni
-- Installazione nuove dipendenze
-
-**PERMESSO**:
+**PERMESSO** (revoca esplicita del divieto v2 "no nuove dipendenze", che è
+causa diretta del fallback a regex):
 - Standard library Python
-- Librerie già installate (`mgclient`, `yaml`, `pycparser` se presente)
-- Directory di output: `/output/`, `/logs/`
+- `mgclient`, `PyYAML` (già presenti)
+- `tree_sitter`, `tree_sitter_language_pack` (da aggiungere a
+  `python_venv_requirements.txt`; installazione una tantum in fase di setup
+  ambiente, non a runtime dello script di estrazione)
 
-## PRIORITÀ OPERATIVE (RE-ORDERED)
-1. **File inventory completo**: Ogni file deve avere un nodo
-2. **Source chunking**: Ogni file testo deve essere segmentato
-3. **Provenance obbligatoria**: Nessuna entità/relation senza chunk reference
-4. **AST-first extraction**: Usare parser quando disponibile
-5. **Entity resolution rigoroso**: Scartare ambigui invece di indovinare
-6. **Relazioni semantiche**: Solo se evidence-backed
+**VIETATO**: qualunque dipendenza non elencata sopra o non giustificata da
+una riga della tabella PARSER REQUIREMENTS.
+
+## PRIORITÀ OPERATIVE
+1. File inventory completo (ogni file ha un nodo `:SourceFile`)
+2. Source chunking (ogni file testo è segmentato)
+3. Estrazione strutturale SOLO tramite i parser assegnati in PARSER REQUIREMENTS
+4. Doc-to-code linking SOLO tramite marcatori strutturali (mai prosa libera)
+5. Entity resolution rigoroso (scartare ambigui invece di indovinare)
+6. Aggiornamento incrementale (manifest + MERGE, mai un reload completo per
+   una singola modifica)
 
 ## NOTA OPERATIVA FINALE
-
-Questo script è un **surrogato di un processo umano+AI** che conoscerà il codebase in profondità. L'obiettivo non è automazione perfetta, ma **evidenziazione sistematica e tracciabile** di nodi e relazioni.
-
-**CAMBIAMENTO CHIAVE vs VERSIONE PRECEDENTE**:
-- Prima: "Estrai quante più entità possibili"
-- Ora: "Estrai solo entità con evidenza tracciabile, scarta il resto"
-
-**Trade-off accettato**:
-- Meno entità totali (scarto di inferenze deboli)
-- Più accuratezza e verificabilità
-- Agent downstream possono validare ogni affermazione contro source text
-
-## MEMGRAPH INGESTION (MANDATORY - RAFFORZATO)
-
-Dopo estrazione e validazione export, eseguire lo script generato **senza** `--skip-db` per caricare il grafo in Memgraph.
-
-**Verifica Obbligatoria Post-Ingestion**:
-```python
-# Dopo ingestion, eseguire query di verifica
-verification_queries = {
-    "files": "MATCH (n:SourceFile) RETURN count(n)",
-    "chunks": "MATCH (n:SourceChunk) RETURN count(n)",
-    "entities_with_provenance": "MATCH (n) WHERE n.chunk_uid IS NOT NULL RETURN count(n)",
-    "relations_with_provenance": "MATCH ()-[r]->() WHERE r.source_chunk_uid IS NOT NULL RETURN count(r)",
-    "relations_missing_provenance": "MATCH ()-[r]->() WHERE r.source_chunk_uid IS NULL RETURN count(r)",
-}
-
-# Se relations_missing_provenance > 0, fallire con exit code 1
-# Se entities_with_provenance < total_entities * 0.95, warning
-```
-
-**Expected Counts Validation**:
-```python
-# Confronta exported vs ingested
-exported_files = len(file_inventory)
-ingested_files = query_count("SourceFile")
-if exported_files != ingested_files:
-    raise RuntimeError(f"File count mismatch: exported {exported_files}, ingested {ingested_files}")
-```
-
-The verification MUST also:
-1. Compare exported and ingested counts per relationship type
-2. Detect duplicate `(subject_uid, predicate, object_uid)` triples
-3. Fail with non-zero exit code when unresolved endpoint expansion is detected
-4. Verify that all `:SourceFile` nodes match the file inventory
+Il trade-off resta lo stesso di v2: meno entità totali a fronte di
+accuratezza verificabile. La differenza rispetto a v2 è che ora
+"verificabile" significa "prodotto da un parser del linguaggio o da un
+marcatore strutturale esplicito", non "prodotto da una regex che nella
+pratica ha estratto rumore".

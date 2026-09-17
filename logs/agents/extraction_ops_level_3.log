@@ -1,6 +1,15 @@
-2026-09-16 17:04:24,856 INFO Cross-linking complete: 97237 relations
-2026-09-16 17:17:30,692 INFO Cross-linking complete: 99748 relations
-2026-09-16 17:21:01,391 INFO Cross-linking complete: 99748 relations
-2026-09-16 17:26:50,865 INFO Cross-linking complete: 140932 relations
-2026-09-16 17:58:31,744 INFO Cross-linking complete: 140932 relations
-2026-09-16 18:04:47,336 INFO Cross-linking complete: 140932 relations
+2026-09-17 12:40:07,961 INFO Cross-linking complete: 121094 relations
+2026-09-17 15:57:34,252 INFO Cross-link pass complete: 21684 relations, 63 ambiguities, 0 unresolved
+2026-09-17 15:59:38,633 INFO Cross-link pass complete: 22660 relations, 295 ambiguities, 5 unresolved
+2026-09-17 16:01:00,498 INFO Cross-link pass complete: 24963 relations, 719 ambiguities, 12 unresolved
+2026-09-17 16:01:44,166 INFO Cross-link pass complete: 25233 relations, 131 ambiguities, 21 unresolved
+2026-09-17 16:02:43,116 INFO Cross-link pass complete: 22562 relations, 456 ambiguities, 100 unresolved
+2026-09-17 16:03:53,684 INFO Cross-link pass complete: 77534 relations, 10238 ambiguities, 722 unresolved
+2026-09-17 16:04:33,959 INFO Cross-link pass complete: 21198 relations, 0 ambiguities, 0 unresolved
+2026-09-17 16:07:08,023 INFO Cross-link pass complete: 247375 relations, 29572 ambiguities, 8439 unresolved
+2026-09-17 16:10:41,888 INFO Cross-link pass complete: 247375 relations, 29572 ambiguities, 8439 unresolved
+2026-09-17 16:29:41,427 INFO Cross-link pass complete: 247378 relations, 0 ambiguities, 0 unresolved
+2026-09-17 16:32:50,554 INFO Cross-link pass complete: 247378 relations, 0 ambiguities, 0 unresolved
+2026-09-17 16:36:04,400 INFO Cross-link pass complete: 247376 relations, 0 ambiguities, 0 unresolved
+2026-09-17 16:40:16,635 INFO Cross-link pass complete: 247376 relations, 0 ambiguities, 0 unresolved
+2026-09-17 16:44:36,129 INFO Cross-link pass complete: 247376 relations, 0 ambiguities, 0 unresolved
