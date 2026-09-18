@@ -79,7 +79,6 @@ Il tuo grafo è progettato come **knowledge base per agent downstream**, il che 
 - **Hybrid Retrieval**: Combinazione di lookup strutturato (graph) + full-text (chunks)
 
 ## Denominazioni Alternative nel Settore
-
 | Contesto | Denominazione |
 |----------|---------------|
 | **AI Engineering** | "Graph-RAG Knowledge Base" |
@@ -90,13 +89,11 @@ Il tuo grafo è progettato come **knowledge base per agent downstream**, il che 
 | **Vendor (Microsoft)** | "Code Intelligence Graph" |
 
 ## Il Tuo Approccio Specifico: Cosa lo Distingue
-
 La combinazione che stai implementando ha caratteristiche distintive:
-
 ```
-┌─────────────────────────────────────────────────────────────┐
+┌────────────────────────────────────────────────────────────┐
 │  YOUR APPROACH: Provenance-Aware Code Knowledge Graph      │
-├─────────────────────────────────────────────────────────────┤
+├────────────────────────────────────────────────────────────┤
 │  ✓ File-level completeness (100% inventory)                │
 │  ✓ Deterministic chunking con evidence preservation        │
 │  ✓ AST-first extraction (parser > regex)                   │
@@ -104,7 +101,7 @@ La combinazione che stai implementando ha caratteristiche distintive:
 │  ✓ Confidence scoring su relazioni (non nodi)              │
 │  ✓ Entity resolution rigoroso (scarto ambigui)             │
 │  ✓ Post-ingestion verification con fail su errori          │
-└─────────────────────────────────────────────────────────────┘
+└───────────────────────────────────────────────────────────┘
 ```
 
 Questa combinazione specifica è emergente nel 2024-2025 con l'adozione di **Graph-RAG** per applicazioni enterprise di AI. Non ha ancora una denominazione standardizzata singola, ma la descrizione più accurata è:
