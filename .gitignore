@@ -1,5 +1,7 @@
+# Generic project gitignores
 .venv/
 __pycache__/
 *.pyc
 .env
 raw_data/
+logs/

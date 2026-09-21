@@ -1,232 +1,159 @@
-# Analisi Logica della Pipeline di Ingestion
+# Analisi Logica della Pipeline di Ingestion (v5 / v3 dello script)
 
-Ecco come funziona lo script, punto per punto.
+Questo documento descrive `output/extraction_script.py` così come è realmente
+implementato oggi. Le versioni precedenti di questo documento descrivevano
+un'architettura basata su Doxygen XML e regex mai realmente implementata in
+quella forma; questa versione riflette lo script eseguibile e verificato su
+`raw_data/sdk-nrf`. Per il razionale completo del perché la pipeline è stata
+riprogettata, vedi `output/v2_extraction_script_nrf_example/17_09_2026.md` e
+la specifica in `agents/rules/prompt_knowledge_graph_extraction.md`.
 
 ---
 
 ## 1. Come vengono formattati fisicamente i dati?
 
-I dati **non vengono trasformati in un formato intermedio**. Ogni file sorgente viene letto e inviato direttamente a Memgraph come nodi/relazioni.
+Ogni file in `raw_data/` viene instradato al parser reale del suo linguaggio;
+non esiste un formato intermedio, ma non esiste nemmeno estrazione via regex
+su prosa libera per le entità semantiche.
 
-| Formato Sorgente | Estrazione | Formato Finale in Memgraph |
-|-----------------|------------|---------------------------|
-| **Markdown/reST** (`*.md`, `*.rst`) | Lettura testo + regex per titolo | Nodo `:Document` con proprietà `path`, `title`, `content` |
-| **Doxygen XML** (`*.xml`) | Parsing XML con `xml.etree.ElementTree` | Nodo `:Function` + relazioni `[:CALLS]` |
-| **Device Tree** (`*.dtsi`) | Regex su `compatible = "..."` | Nodo `:HardwarePeripheral` con proprietà `compatible` |
-| **YAML Board** (`*.yaml`) | Parsing YAML con `yaml.safe_load()` | Nodo `:Board` + relazioni `[:SUPPORTS]` |
+| Formato Sorgente | Estrazione | Nodi/relazioni prodotti |
+|---|---|---|
+| `.py` | modulo nativo `ast` | `:Function`, `:Class`, `:Variable`, `DECLARES`, `CALLS` |
+| `.c .h .cc .cpp .cxx .hh .hpp` | `tree_sitter_language_pack` grammatica `c`/`cpp` | `:Function`, `:Class` (struct/union), `:Type` (typedef/enum), `:Macro`, `:Variable`, `DECLARES`, `CALLS`, `INCLUDES` |
+| `Kconfig`, `Kconfig.*` | tree-sitter grammatica `kconfig` | `:KconfigOption`, `DEPENDS_ON`, `SELECTS` |
+| `.conf`, `*_defconfig` | parser di linea dedicato (`CONFIG_X=valore`) | `SETS` verso `:KconfigOption` (uid globale, senza prefisso `CONFIG_`) |
+| `.dts .dtsi .overlay` | tree-sitter grammatica `devicetree` | `:DTNode`, `CHILD_OF`, `REFERENCES` (phandle `&label`), `COMPATIBLE_WITH` |
+| `.yaml`/`.yml` sotto `dts/bindings/**` | `PyYAML` (`yaml.safe_load`) | `:DTBinding` (uid = stringa `compatible`) |
+| `.rst` | tree-sitter grammatica `rst` | `:Document`, `:Concept` (titoli sezione), `:Requirement` (frasi con verbo modale esplicito), `REFERENCES` risolte da ruoli Sphinx (`:c:func:`, `:kconfig:option:`, `:file:`, `:ref:`, ...) |
+| `.md`/`.markdown` | regex di linea deterministico su heading/code-span (sintassi non ambigua, non serve un parser dedicato) | `:Document`, `:Concept`, `REFERENCES` da code span |
+| Tutto il resto (immagini, binari, CMake, certificati, ...) | nessuno | solo `:SourceFile` + `:SourceChunk` (inventario e testo, nessuna entità semantica inventata) |
 
-**Esempio concreto:**
+**Esempio reale, verificato sul grafo popolato in questa sessione:**
 
-Un file `doc/intro.md`:
-```markdown
-# Introduction
-This is the Zephyr RTOS documentation.
-```
-
-Diventa in Memgraph:
 ```cypher
-(:Document {
-  path: "doc/intro.md",
-  title: "Introduction",
-  content: "This is the Zephyr RTOS documentation.",
-  type: "documentation"
-})
+MATCH (n:DTNode {name:"hfxo"})-[:COMPATIBLE_WITH]->(b:DTBinding)
+RETURN n.file, b.name
 ```
+restituisce `sdk-nrf/dts/common/nordic/nrf9251.dtsi` →
+`nordic,nrf92-hfxo`, letto direttamente dal nodo Devicetree
+`hfxo: hfxo { compatible = "nordic,nrf92-hfxo"; ... }` e dal binding YAML
+corrispondente in `dts/bindings/clock/`.
 
 ---
 
 ## 2. Come vengono caricati nel sistema?
 
-Il caricamento avviene tramite **query Cypher eseguite in tempo reale** sulla connessione Bolt.
-
-### Flusso di caricamento:
-
-```
-File Sorgente → Python Script → Query Cypher → Memgraph DB
-```
-
-### Meccanismo tecnico:
+Il caricamento avviene in batch tramite `UNWIND $rows AS row MERGE (...)`,
+mai una query per singolo nodo/relazione:
 
 ```python
-# 1. Apri connessione
-conn = Connection(host="localhost", port=7687, username="", password="")
-
-# 2. Prepara query con parametri
-query = """
-CREATE (d:Document {
-    path: $path,
-    title: $title,
-    content: $content
-})
-"""
-
-# 3. Esegui con parametri (sanitizzati automaticamente)
-execute_query(conn, query, {
-    "path": "doc/intro.md",
-    "title": "Introduction",
-    "content": "..."
-})
+query = (
+    f"UNWIND $rows AS row MERGE (n:{label} {{uid: row.uid}}) "
+    "SET n.name=row.name, n.file=row.file, ..."
+)
+cursor.execute(query, {"rows": rows[start:start + 1000]})
 ```
 
-**Nota:** Non c'è batch processing. Ogni file genera una o più query immediate. Per grandi volumi, andrebbe aggiunto il batching.
+`MERGE` per `uid` rende l'operazione idempotente: ri-eseguire l'ingestion con
+gli stessi dati non crea duplicati. Questo è anche il meccanismo che rende
+possibile l'aggiornamento incrementale (sezione 5).
+
+Le relazioni sono raggruppate per coppia `(label soggetto, label oggetto)`
+prima della `MATCH`, in modo che ogni query usi l'indice per-label su `uid`
+invece di una scansione di proprietà senza label (che su un grafo da ~150.000
+nodi impiegherebbe ore invece di minuti: verificato empiricamente in questa
+sessione, vedi nota di performance più sotto).
 
 ---
 
 ## 3. Come viene definito lo schema?
 
-**Non esiste uno schema predefinito.** Memgraph è **schema-less** (come tutti i graph DB).
+Lo schema non è imposto da Memgraph (che resta schema-less), ma è **esplicito
+e verificabile** in due punti:
 
-Lo schema emerge **implicitamente** dalle query di creazione:
+1. `agents/rules/prompt_knowledge_graph_extraction.md`, sezioni NODE SCHEMA e
+   RELATIONSHIP SCHEMA: la specifica dichiarativa di ogni label/relazione e
+   di chi la genera.
+2. `output/graph_schema.json`, generato ad ogni esecuzione dello script:
+   conteggio reale per label/relazione, `required_properties`, e per ogni
+   relazione i `start_labels`/`end_labels` osservati realmente nei dati (non
+   dichiarati a priori, calcolati dal grafo estratto).
 
-| Label | Proprietà | Relazioni |
-|-------|-----------|-----------|
-| `:Document` | `path`, `title`, `content`, `type` | Nessuna (per ora) |
-| `:Function` | `name`, `file`, `kind` | `[:CALLS]` → `:Function` |
-| `:HardwarePeripheral` | `compatible`, `source_file` | `[:USES]` ← `:Function` |
-| `:Board` | `id`, `name`, `path` | `[:SUPPORTS]` → `:HardwarePeripheral` |
-
-### Dove è definito nello script:
-
-Ogni funzione `ingest_*()` contiene le query che **creano implicitamente** lo schema:
-
-```python
-# Definizione implicita del nodo Document
-query = """
-CREATE (d:Document {
-    path: $path,
-    title: $title,
-    content: $content,
-    type: 'documentation'
-})
-"""
-
-# Definizione implicita della relazione CALLS
-query = """
-MERGE (caller)-[:CALLS]->(callee)
-"""
-```
-
-### Per verificare lo schema esistente:
-
-In Memgraph Lab, esegui:
+Per ispezionare lo schema a runtime:
 ```cypher
-CALL schema.get() YIELD label, property, type
-RETURN label, collect(property) as properties;
-```
-
-Oppure per vedere i tipi di relazioni:
-```cypher
-MATCH ()-[r]->()
-RETURN DISTINCT type(r) as relationship_type;
+MATCH (n) RETURN labels(n)[0] AS label, count(*) AS n ORDER BY n DESC;
+MATCH ()-[r]->() RETURN type(r) AS rel, count(*) AS n ORDER BY n DESC;
 ```
 
 ---
 
-## 4. Come sai che fanno riferimento a dati reali?
+## 4. Come sai che i riferimenti fanno riferimento a dati reali?
 
-Questa è la domanda critica. Attualmente, lo script **NON valida** che i riferimenti esistano.
-
-### Problemi attuali:
+Ogni relazione che collega due entità per nome (non per struttura esplicita
+del parser, es. `CALLS`, `REFERENCES`, phandle Devicetree) passa da una
+**symbol table** costruita dopo che tutti i file sono stati analizzati
+(`build_symbol_indices`), e viene creata solo se il nome risolve a
+**esattamente un** candidato:
 
 ```python
-# Questa query può creare relazioni "orfane"
-MATCH (caller:Function {name: $caller, file: $caller_file})
-MATCH (callee:Function {name: $callee})
-MERGE (caller)-[:CALLS]->(callee)
+def pick_unique(candidates, referencing_file=""):
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    same_file = [c for c in candidates if c.source_file == referencing_file]
+    ...
+    return None  # ambiguo: la relazione NON viene creata
 ```
 
-Se `callee` non esiste, **la query fallisce silenziosamente** (grazie al `try/except` che continua).
-
-### Come garantire riferimenti validi:
-
-#### Opzione A: Usa `MERGE` invece di `MATCH` + `MERGE`
-
-```python
-# Invece di:
-MATCH (caller:Function {...})
-MATCH (callee:Function {...})
-MERGE (caller)-[:CALLS]->(callee)
-
-# Usa:
-MERGE (caller:Function {name: $caller, file: $caller_file})
-MERGE (callee:Function {name: $callee})
-MERGE (caller)-[:CALLS]->(callee)
-```
-
-Questo **crea i nodi mancanti** se non esistono, garantendo che la relazione sia sempre valida.
-
-#### Opzione B: Verifica post-ingestion
-
-Esegui una query per trovare relazioni "rotte":
-```cypher
-MATCH (f:Function)-[:CALLS]->(g)
-WHERE NOT (g:Function)
-RETURN f.name as Broken_Call;
-```
-
-#### Opzione C: Usa ID univoci invece di nomi
-
-I nomi delle funzioni possono essere duplicati. Meglio usare ID univoci da Doxygen:
-
-```python
-# Doxygen XML fornisce un ID univoco per ogni elemento
-func_id = compound.get("id")  # Es: "group__kernel_1ga123456"
-
-query = """
-MERGE (f:Function {id: $id})
-ON CREATE SET f.name = $name, f.file = $file
-"""
-```
+Se i candidati sono zero o più di uno (e non risolvibili per priorità
+same-file/definizione), la relazione non viene creata: l'occorrenza finisce
+in `output/ambiguities.json` o `output/unresolved_relations.json` con il
+motivo esatto. Non esistono relazioni "orfane" create per costruzione: la
+query di ingestion usa `MATCH` (non `MERGE`) sugli endpoint, quindi una riga
+il cui `subject`/`object` non esiste come nodo viene semplicemente scartata
+dalla UNWIND, mai trasformata in un nodo fantasma.
 
 ---
 
-## Riepilogo del Flusso Completo
+## 5. Aggiornamento incrementale (assente nelle versioni precedenti)
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ 1. FILE SORGENTE                                            │
-│    - doc/intro.md                                           │
-│    - include/zephyr/kernel.h                                │
-│    - dts/arm/nrf52.dtsi                                     │
-│    - boards/nrf52840dk.yaml                                 │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 2. PARSING (Python)                                         │
-│    - markdown: lettura testo + estrazione titolo            │
-│    - XML: ElementTree.find() per nodi compounddef           │
-│    - DTS: regex per "compatible = ..."                      │
-│    - YAML: yaml.safe_load()                                 │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 3. QUERY CYPHER GENERATE                                    │
-│    - CREATE (:Document {...})                               │
-│    - MERGE (:Function {...})                                │
-│    - MERGE ()-[:CALLS]->()                                  │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 4. MEMGRAPH DB                                              │
-│    - Nodi memorizzati in RAM                                │
-│    - Relazioni indicizzate                                  │
-│    - Queryabili in tempo reale                              │
-└─────────────────────────────────────────────────────────────┘
+python output/extraction_script.py --full     # prima ingestion / reset completo
+python output/extraction_script.py --update   # solo i file cambiati da raw_data
+python output/extraction_script.py --skip-db  # solo export dei file, nessuna scrittura su Memgraph
+python output/extraction_script.py --ingest-existing  # ri-carica gli export già presenti
 ```
+
+`--update` calcola lo sha256 di ogni file in `raw_data/` e lo confronta con
+`output/ingestion_manifest.json` dell'esecuzione precedente, ottenendo tre
+insiemi: `added`, `modified`, `removed`. Solo i file `added`/`modified`
+vengono ri-analizzati; i file `removed` (e le rispettive cartelle rimaste
+vuote) vengono cancellati da Memgraph. Il cross-linking (symbol table,
+`CALLS`, riferimenti documentazione↔codice) viene invece sempre ricalcolato
+per intero sull'insieme unito in memoria, operazione che non richiede
+ri-lettura dei file ed è quindi rapida anche su tutta la repository.
+
+Verificato in questa sessione con un file di test usa-e-getta: aggiunta →
+`1 added`, il nuovo simbolo compare nel grafo; modifica → il simbolo vecchio
+sparisce e il nuovo compare, il resto del grafo resta invariato; rimozione →
+il grafo torna esattamente al conteggio nodi/relazioni precedente.
 
 ---
 
-## Raccomandazioni per la Produzione
+## Nota di performance (rilevante per chi modifica lo script)
 
-| Problema | Soluzione |
-|----------|-----------|
-| **Nessuno schema esplicito** | Crea un documento `schema.md` che descrive label e proprietà attese |
-| **Riferimenti non validati** | Usa `MERGE` invece di `MATCH` + `MERGE`, o aggiungi verifica post-ingestion |
-| **Nomi duplicati** | Usa ID univoci (da Doxygen o hash del path) invece di nomi |
-| **Nessun batching** | Raggruppa query in transazioni da 100-500 nodi per performance |
-| **Nessun versioning** | Aggiungi proprietà `ingested_at`, `source_version` ai nodi |
+La prima versione della query di ingestion delle relazioni usava
+`MATCH (a) WHERE a.uid = row.subject` senza specificare la label. Su un
+grafo con poche migliaia di nodi è indistinguibile in velocità dalla verifica
+con label; su questo grafo (~150.000 nodi) portava il tempo stimato di
+ingestion delle sole relazioni a diverse ore. Raggruppare le righe per
+`(subject_label, object_label)` e specificare la label in ogni `MATCH` (così
+da usare l'indice creato con `CREATE INDEX ON :Label(uid)`) ha ridotto il
+tempo totale di ingestion (nodi + 268.268 relazioni) a circa due minuti.
 
----
+## Nota su una label riservata
+
+`Directory` è una parola riservata nella grammatica Cypher di Memgraph
+(`CREATE INDEX ON :Directory(uid)` fallisce con un errore di parsing). La
+label usata per le cartelle di `raw_data/` è quindi `:Folder`.

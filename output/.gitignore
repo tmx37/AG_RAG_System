@@ -1,0 +1,4 @@
+# Ignore everything in the output folder exept for the extraction_scripts
+*
+!extraction_script.py
+!/*/extraction_script.py

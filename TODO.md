@@ -22,3 +22,8 @@ Use the *same prompt* for 4 different approaches:
 2. Agent + Document-index (todo: create a generic index on .md file)
 3. Agent + Raw "database" without index
 4. Agent + Raw "database" retrived by internet
+
+# NB:
+- Provare ad implementare tecniche di prompt caching per le operazioni comuni di graph traversal
+- Implementare policy di economia di token nei prompt in cache (small contexts, output ottimizzato, ) + prompt di "istruzioni" per fare economia
+

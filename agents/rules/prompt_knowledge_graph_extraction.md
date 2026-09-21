@@ -1,390 +1,380 @@
-# SYSTEM ROLE: Knowledge Graph Extraction Agent - Codebase Analysis
-# VERSION: 3.0 - Graph-Native Data Model
+# SYSTEM ROLE: Knowledge Graph Extraction Agent - Production-Grade Codebase Analysis
+# VERSION: 5.0 - Parser-First, Incrementally-Updatable Knowledge Graph
+#
+# CHANGELOG vs 4.1 (v2, archiviata in `output/v2_extraction_script_nrf_example/`):
+# - root cause analysis completa in
+#   `output/v2_extraction_script_nrf_example/17_09_2026.md`. In sintesi: v2
+#   dichiarava "AST-first, regex come fallback" ma lo script che ne è stato
+#   derivato usava regex su prosa non filtrata per TUTTA l'estrazione
+#   codice/documentazione, producendo entità come "Device", "Guidelines",
+#   "ABC" da parole inglesi comuni, e relazioni `REFERENCES`/`SATISFIES`
+#   fasulle da matching per nome non scoped (`nodes_by_name[name.casefold()]`
+#   su tutta la repository).
+# - v5 rende il vincolo "usare un parser" NON aggirabile: specifica
+#   esattamente quale libreria usare per ogni linguaggio (sezione
+#   PARSER REQUIREMENTS), vieta esplicitamente il pattern regex che ha
+#   causato il problema, e introduce nodi/relazioni dedicati per Kconfig e
+#   Devicetree (la superficie di implementazione più rilevante per un SDK
+#   firmware, assente in v2).
+# - v5 aggiunge la INCREMENTAL UPDATE SPECIFICATION: il grafo deve poter
+#   essere aggiornato in base ai soli file cambiati in `/raw_data/`, non
+#   richiedere una re-ingestion completa ad ogni modifica.
+# - v5 revoca il divieto "no nuove dipendenze" limitatamente ai parser
+#   elencati in PARSER REQUIREMENTS: il divieto stesso è la causa diretta
+#   per cui v2 è ricaduta su regex (nessun parser C/Kconfig/Devicetree era
+#   autorizzato). Restano vietati accesso a rete a runtime e dipendenze non
+#   motivate da un parser mancante.
 
 ## MISSION
-Generare uno script Python che estragga una rete semantica densa e contestualizzata di entità e relazioni dal codice sorgente e documentazione in `/raw_data/` per l'integrazione su GraphDB del grafo risultante. 
+Generare uno script Python che estragga una rete semantica **evidence-backed**
+di entità e relazioni dal codice sorgente, configurazione e documentazione in
+`/raw_data/` per l'integrazione su GraphDB, e che possa **ri-eseguire
+l'estrazione in modo incrementale** quando `/raw_data/` cambia, senza dover
+ricostruire l'intero grafo ogni volta.
 
-**CRITICAL REQUIREMENT**: Il modello di dati DEVE sfruttare le capacità native di un graph database. Nodi tipizzati e relazioni esplicite sono obbligatori per abilitare query efficienti da parte di agent downstream.
+**CRITICAL REQUIREMENT**: Ogni entità e relazione DEVE essere tracciabile a
+evidenza testuale esatta nel source, prodotta da un **parser reale del
+linguaggio**, non da un pattern regex su testo libero. Le uniche eccezioni
+regex ammesse sono quelle elencate esplicitamente in PARSER REQUIREMENTS per
+formati talmente semplici e non ambigui (es. `CONFIG_X=y`) da non avere una
+grammatica dedicata disponibile.
 
-Priorità: qualità delle relazioni semantiche > struttura del grafo > velocità di esecuzione. L'agente deve operare come un team di sviluppatori senior con conoscenza approfondita del codebase.
+Priorità: **provenance accuracy > completezza file-level > qualità relazioni
+semantiche > aggiornabilità incrementale > velocità**.
 
 ## INPUT SPECIFICATION
-- Root directory: `/raw_data/` (ricorsivo, tutte le sottocartelle)
-- Reference implementation: `/DB/example_ingest_data.py` (VINCOLANTE per: struttura architetturale, query database, librerie autorizzate, pattern di inserimento)
-- File types: Tutti i file presenti (priorità: codice sorgente + documentazione tecnica)
+- Root directory: `/raw_data/` (ricorsivo, tutte le sottocartelle, TUTTI i file)
+- Reference implementation precedente: `/output/v2_extraction_script_nrf_example/extraction_script.py`
+  (SOLO come riferimento storico di cosa NON fare; vedi
+  `output/v2_extraction_script_nrf_example/17_09_2026.md`)
+- Real-data constraint: basarsi esclusivamente su file presenti in `/raw_data/`
 
 ## OUTPUT SPECIFICATION
 - Script Python: `/output/extraction_script.py` (eseguibile, autonomo)
-- Entities: JSONL o formato definito da `example_ingest_data.py`
-- Relations: JSONL o formato definito da `example_ingest_data.py`
-- Logs: `/logs/agents/extraction_ops_level_{1-4}.log` (tracciamento flusso estrazione)
-- Access log: `/logs/access_log.jsonl` (tracciamento accessi file)
+- Entities: JSONL con schema definito sotto (`/output/entities.jsonl`)
+- Relations: JSONL con provenance obbligatoria (`/output/relations.jsonl`)
+- Source chunks: `/output/source_chunks.jsonl` (testo segmentato con evidenza)
+- Manifest di ingestion incrementale: `/output/ingestion_manifest.json`
+  (sha256 per file, usato per calcolare added/modified/deleted tra due run)
+- Logs: `/logs/agents/extraction_ops_level_{1-5}.log`
+- Access log: `/logs/access_log.jsonl`
 - Ambiguities report: `/output/ambiguities.json`
-- Graph schema report: `/output/graph_schema.json` (documenta label e relationship type usati)
+- Unresolved relations report: `/output/unresolved_relations.json`
+- Graph schema report: `/output/graph_schema.json`
 
-## ENTITY TYPES (TASSONOMIA CONTEXT-AWARE) - GRAPH LABELS
-Ogni tipo di entità DEVE corrispondere a un **label distinto** nel graph database, non a una proprietà.
+## PARSER REQUIREMENTS (MANDATORY, NON-NEGOTIABLE)
 
-| Label | Criterio di Identificazione | Proprietà Obbligatorie |
-|-------|----------------------------|------------------------|
-| `:Function` | Dichiarazione con corpo eseguibile | name, file, line_start, line_end, signature |
-| `:Class` | Dichiarazione con attributi/metodi | name, file, line_start, line_end, extends |
-| `:Module` | File importabile o namespace | name, path, type (file/package) |
-| `:Variable` | Assign con scope > locale | name, file, line_start, scope |
-| `:Type` | Type definition, typedef, alias | name, file, line_start, kind (enum/struct/union) |
-| `:Concept` | Entità semantica da documentazione | name, source, line_start, category |
-| `:Requirement` | Specifica funzionale/non-funzionale | text, source, line_start, priority |
-| `:API` | Interfaccia documentata pubblica | name, source, line_start, visibility |
-| `:Document` | File di documentazione | path, title, type (md/rst/txt) |
+Ogni linguaggio/formato riconosciuto DEVE essere estratto con il parser
+elencato qui sotto. È vietato scrivere un pattern regex per identificare
+funzioni, classi/struct, opzioni Kconfig, nodi Devicetree, o riferimenti
+incrociati documentazione↔codice quando il linguaggio ha un parser assegnato
+in questa tabella.
 
-**VINCOLO DI MODELLO DATI**: 
-- `:Entity` come label generico è **VIETATO** per nodi tipizzati
-- Il tipo deve essere un label, non una proprietà `type`
-- Query Cypher devono usare `MATCH (n:Function)` non `MATCH (n:Entity WHERE n.type = "Function")`
+| Formato | Estensioni/nomi file | Parser obbligatorio |
+|---------|----------------------|----------------------|
+| Python | `.py` | modulo nativo `ast` |
+| C / C++ | `.c .h .cc .cpp .cxx .hh .hpp .ipp` | `tree_sitter_language_pack.get_parser("c"\|"cpp")` |
+| Kconfig (dichiarazioni) | file chiamati `Kconfig` o `Kconfig.*` | `tree_sitter_language_pack.get_parser("kconfig")` |
+| Kconfig (valori/fragment) | `.conf`, `*_defconfig`, `*.defconfig` | parser di linea dedicato (vedi sotto; sintassi `CONFIG_X=valore` non ha ambiguità e non richiede una grammatica) |
+| Devicetree | `.dts .dtsi .overlay` | `tree_sitter_language_pack.get_parser("devicetree")` |
+| Devicetree bindings | `.yaml/.yml` sotto `dts/bindings/**` | `PyYAML` (`yaml.safe_load`), non tree-sitter: servono i valori semantici (`compatible`, `properties`), non solo la sintassi |
+| reStructuredText | `.rst` | `tree_sitter_language_pack.get_parser("rst")` |
+| Markdown | `.md .markdown` | parser di linea dedicato per heading (`^#{1,6}\s`) e code span (`` `testo` ``); sintassi non ambigua, non richiede tree-sitter |
+| CMake | `.cmake`, `CMakeLists.txt` | fuori scope v5: inventariare e segmentare (`SourceFile` + `SourceChunk`), NON estrarre entità semantiche. Documentato come lavoro futuro. |
+| Altro YAML/JSON/TOML generico | non sotto `dts/bindings/` | `PyYAML`/`json`/`tomllib` per validare che sia testo strutturato leggibile, poi solo inventario + chunk. Nessuna entità semantica inventata. |
+| Tutto il resto (immagini, certificati, binari, testo libero senza struttura riconosciuta) | — | solo inventario (`SourceFile`) + chunk se decodificabile come testo. Nessuna entità semantica. |
 
-## RELATION TYPES (PREDICATI COME RELATIONSHIP TYPE)
-Ogni predicato DEVE corrispondere a un **relationship type distinto** nel graph database, non a una proprietà.
+**VINCOLO DI INSTALLAZIONE**: `tree_sitter` e `tree_sitter_language_pack` sono
+dipendenze autorizzate e obbligatorie (wheel precompilati, nessun bisogno di
+un compilatore C o di preprocessare gli header). Vanno aggiunte a
+`python_venv_requirements.txt`. Non sono ammesse altre dipendenze non
+motivate da una riga di questa tabella.
 
-| Category | Relationship Types (Cypher) | Semantica |
-|----------|----------------------------|-----------|
-| **Structural** | `:CONTAINS`, `:DECLARES`, `:IMPORTS`, `:EXTENDS`, `:IMPLEMENTS`, `:INSTANTIATES` | Struttura codice |
-| **Behavioral** | `:CALLS`, `:USES`, `:RETURNS`, `:THROWS`, `:OVERRIDES`, `:ASSIGNES_TO` | Comportamento runtime |
-| **Semantic** | `:DESCRIBES`, `:SATISFIES`, `:ILLUSTRATES`, `:CONSTRAINS`, `:DEFINES` | Significato documentazione |
-| **Architectural** | `:DEPENDS_ON`, `:CONNECTS_TO`, `:DELEGATES_TO`, `:CONFIGURES` | Architettura sistema |
+**REGOLA ANTI-REGRESSIONE (deriva direttamente dal bug osservato in v2)**:
+è ESPLICITAMENTE VIETATO un pattern come il seguente, che ha causato la
+generazione di entità da parole inglesi comuni:
 
-**VINCOLO DI MODELLO DATI**:
-- `:RELATED` come relationship type generico è **VIETATO**
-- Il predicato deve essere il tipo di relazione, non una proprietà `predicate`
-- Query Cypher devono usare `MATCH (a)-[:CALLS]->(b)` non `MATCH (a)-[:RELATED {predicate: "CALLS"}]->(b)`
-
-## CONFIDENCE SCORE (DEFINIZIONE CONTEXTUAL)
-Il confidence score (0-1) è una **proprietà della relazione**, non del nodo.
-
-| Range | Significato | Criterio |
-|-------|-------------|----------|
-| 0.90-1.0 | Esplicito | Dichiarazione diretta nel codice/doc |
-| 0.75-0.89 | Fortemente inferito | Pattern ricorrente + convenzioni naming |
-| 0.60-0.74 | Inferito da contesto | Deduzione da uso consistente |
-| 0.40-0.59 | Ipotesi debole | Basato su singole occorrenze |
-| <0.40 | Scarta | Troppo speculativo |
-
-## ESTRATTORE MULTI-LIVELLO - APPROCCIO TEAM SVILUPPATORI
-
-### Livello 1: Estrazione Strutturale (Static Analysis Surrogate)
-**Per Codice**:
-```
-Nodi (con label specifici):
-  (:Module {name: "file.py", path: "src/file.py"})
-  (:Function {name: "process_data", file: "src/file.py", line: 10})
-  (:Class {name: "DataHandler", file: "src/file.py", line: 25})
-  (:Variable {name: "GLOBAL_CONFIG", file: "src/file.py", line: 5})
-
-Relazioni (con type specifici):
-  (:Module)-[:CONTAINS]->(:Function)
-  (:Function)-[:CALLS]->(:Function)
-  (:Function)-[:USES]->(:Variable)
-  (:Class)-[:EXTENDS]->(:Class)
-  (:Module)-[:IMPORTS]->(:Module)
+```python
+# VIETATO - causa reale del bug in v2, non riproporre in nessuna forma
+re.finditer(r"(?i)\b(?:api|endpoint|interface|function)\s*[:`]*\s*([A-Za-z_]\w*)", text)
 ```
 
-**Per Documentazione**:
-```
-Nodi (con label specifici):
-  (:Document {path: "doc/api.md", title: "API Reference"})
-  (:Concept {name: "interrupt handler", source: "doc/api.md", line: 45})
-  (:Requirement {text: "LATENCY < 10ms", source: "doc/req.md", line: 12})
+Qualunque estrazione di riferimenti API/simboli da un documento DEVE passare
+da un marcatore strutturale esplicito (ruolo Sphinx/RST, code span Markdown,
+nodo AST), MAI da una parola-chiave seguita da testo libero.
 
-Relazioni (con type specifici):
-  (:Document)-[:HAS_SECTION]->(:Concept)
-  (:Concept)-[:DESCRIBES]->(:Function)
-  (:Requirement)-[:SATISFIED_BY]->(:Function)
-```
+## MANDATORY: FILE-LEVEL INVENTORY (INVARIATO DA v1/v2)
+**Primo passo obbligatorio**: Creare un nodo per OGNI file e directory in `/raw_data/`.
 
-### Livello 2: Estrazione Semantica (LLM-based Human Surrogate)
-Identificare entità non esplicite nell'AST:
-- Concetti di dominio (es. "real-time constraint", "memory pool")
-- Pattern architetturali (es. state machine, producer-consumer)
-- Dipendenze implicite (es. "assume X inizializzato")
-- Constraint non funzionali (timing, memory, concurrency)
+### Node Types - File System Layer
+| Label | Proprietà Obbligatorie |
+|-------|----------------------|
+| `:Folder` | uid, path, name, parent_uid (nota: `Directory` è una parola riservata nella grammatica Cypher di Memgraph — `CREATE INDEX ON :Directory(...)` fallisce — quindi la label usata è `:Folder`) |
+| `:SourceFile` | uid, path, name, extension, size_bytes, sha256_hash, line_count (se testo), detected_type (code/doc/config/binary/other), language |
 
-### Livello 3: Cross-Linking Codice-Documentazione
-**Entity Resolution**:
-1. Exact match (nome identico): confidence = 0.95
-2. Signature match (parametri + return type): confidence = 0.85
-3. Context match (stesso modulo): confidence = 0.75
-4. Semantic match (descrizione corrisponde): confidence = 0.70
-
-**Relazioni Cross-Link**:
-```
-(:Function)-[:DOCUMENTED_IN]->(:Document)
-(:Requirement)-[:IMPLEMENTED_BY]->(:Module)
-(:API)-[:EXPOSED_BY]->(:Module)
-(:Concept)-[:REFERENCED_IN]->(:Function)
+### Relationships - File System Layer
+```cypher
+(:Folder)-[:CONTAINS]->(:Folder)
+(:Folder)-[:CONTAINS]->(:SourceFile)
+(:SourceFile)-[:INCLUDES]->(:SourceFile)   // #include/import risolto contro l'albero reale dei file
 ```
 
-### Livello 4: Arricchimento Contestuale (Graph Analysis)
-1. **Cluster funzionali**: Identificare comunità (es. tutti i moduli UART)
-2. **Nodi critici**: Betweenness centrality per SPOF detection
-3. **Entità isolate**: Segnalare nodi con degree = 0
-4. **Percorsi frequenti**: Pre-calcolare path per query multi-hop
+**VINCOLO**: Se un file esiste in `/raw_data/`, DEVE avere un nodo `:SourceFile`.
+Nessuna eccezione. L'elenco canonico dei file DEVE essere costruito con una
+scansione ricorsiva del filesystem (`RAW_DATA_DIR.rglob("*")`), mai da una
+lista `processable`/`supported_files` filtrata per estensione prima
+dell'inventario.
 
-## GRAPH SCHEMA DEFINITION (MANDATORY)
-Lo script DEVE generare `/output/graph_schema.json` con:
+Il conteggio deve essere verificato prima dell'export e dopo l'ingestion:
+```python
+discovered_count = len(all_files)
+exported_count = len(file_inventory)
+source_file_count = count_entities(label="SourceFile")
+if not (discovered_count == exported_count == source_file_count):
+    raise RuntimeError("File completeness failure")
+```
 
-```json
+## SOURCE CHUNK SPECIFICATION (INVARIATO)
+Ogni file di testo DEVE essere segmentato in nodi `:SourceChunk` a finestra
+fissa (200 righe, senza overlap) per garantire evidenza recuperabile anche
+per i file senza parser semantico dedicato. Ogni entità semantica riporta in
+`metadata.source_chunk_uid` il chunk che la contiene, oltre a conservare
+`source_text` (lo snippet esatto prodotto dal parser) quando disponibile:
+questa è la evidenza a grana fine, il chunk è l'evidenza a grana di file.
+
+```python
 {
-  "node_labels": [
-    {"label": "Function", "count": int, "required_properties": ["name", "file", "line_start"]},
-    {"label": "Class", "count": int, "required_properties": ["name", "file", "line_start"]},
-    ...
-  ],
-  "relationship_types": [
-    {"type": "CALLS", "count": int, "start_labels": ["Function"], "end_labels": ["Function"]},
-    {"type": "CONTAINS", "count": int, "start_labels": ["Module"], "end_labels": ["Function", "Class"]},
-    ...
-  ],
-  "indexes_created": [
-    {"label": "Function", "property": "name"},
-    {"label": "Function", "property": "file"},
-    ...
-  ]
+    "uid": "SourceChunk|<source_file>|<line_start>-<line_end>|<hash12>",
+    "source_file": "<relative path>",
+    "line_start": int,
+    "line_end": int,
+    "content": "<testo esatto>",
+    "chunk_type": "fixed_window",
 }
 ```
 
-## INDEXING STRATEGY (MANDATORY FOR PERFORMANCE)
-Lo script DEVE creare indici su Memgraph per abilitare query efficienti:
+## NODE SCHEMA (AGGIORNATO v5)
 
-```cypher
-CREATE INDEX ON :Function(name);
-CREATE INDEX ON :Function(file);
-CREATE INDEX ON :Function(uid);
-CREATE INDEX ON :Class(uid);
-CREATE INDEX ON :Module(uid);
-CREATE INDEX ON :Variable(uid);
-CREATE INDEX ON :Type(uid);
-CREATE INDEX ON :Concept(uid);
-CREATE INDEX ON :Requirement(uid);
-CREATE INDEX ON :API(uid);
-CREATE INDEX ON :Document(uid);
-CREATE INDEX ON :Class(name);
-CREATE INDEX ON :Module(path);
-CREATE INDEX ON :Requirement(text);
-CREATE INDEX ON :Document(path);
+Ogni entità semantica riporta `extraction_method` (es. `"tree-sitter-c"`,
+`"tree-sitter-kconfig"`, `"tree-sitter-devicetree"`, `"tree-sitter-rst"`,
+`"python-ast"`, `"pyyaml"`, `"markdown-heading"`, `"kconfig-fragment"`) al
+posto di un punteggio di confidence numerico: l'esistenza stessa dell'entità
+è già certificata dal parser. Il confidence score resta **esclusivamente**
+una proprietà delle relazioni (vedi sezione dedicata).
+
+| Label | Proprietà chiave | Da chi è generato |
+|-------|-------------------|--------------------|
+| `:Function` | uid, name, file, line_start, line_end, kind (`declaration`\|`definition`), signature, return_type, parameters, source_text | tree-sitter c/cpp, python ast |
+| `:Class` | uid, name, file, line_start, line_end, kind (`struct`\|`union`\|`class`), source_text | tree-sitter c/cpp, python ast |
+| `:Type` | uid, name, file, line_start, line_end, kind (`typedef`\|`enum`), underlying, source_text | tree-sitter c/cpp |
+| `:Macro` | uid, name, file, line_start, line_end, kind (`object`\|`function`), parameters, value_text | tree-sitter c/cpp |
+| `:Variable` | uid, name, file, line_start, line_end, source_text | tree-sitter c/cpp (solo scope file/translation-unit, MAI variabili locali), python ast (assegnazioni a livello di modulo) |
+| `:KconfigOption` | uid (`KconfigOption\|{NAME}`, globale, non scoped per file), name, file, type (`bool`\|`int`\|`string`\|`hex`\|`tristate`), prompt, help_text | tree-sitter kconfig |
+| `:DTNode` | uid, name (label se presente, altrimenti nome@unit_address), file, node_path, label, unit_address, compatible (lista) | tree-sitter devicetree |
+| `:DTBinding` | uid (`DTBinding\|{compatible}`, globale), compatible, file, description | PyYAML su `dts/bindings/**/*.yaml` |
+| `:Document` | uid, path, title, doc_type (`rst`\|`md`\|`txt`) | inventario + tree-sitter rst / markdown |
+| `:Concept` | uid, name, file, line_start, heading_level | tree-sitter rst (nodo `title`/`section`), markdown heading |
+| `:Requirement` | uid, text, file, line_start | tree-sitter rst, SOLO su frasi con verbo modale esplicito (vedi REQUIREMENT EXTRACTION) |
+| `:SourceChunk` | uid, source_file, line_start, line_end, content, chunk_type | chunking a finestra fissa |
+
+**Nodi rimossi rispetto a v2**: `:API` generico e `:Module` generico sono
+eliminati. Il primo esisteva solo per la regex vietata sopra; il secondo
+duplicava `:SourceFile` senza aggiungere informazione (ogni file aveva sia un
+nodo `:Module` sia, se documento, un nodo `:Document` per la stessa entità
+fisica). I simboli di codice si collegano direttamente a `:SourceFile` con
+`DECLARES`; i riferimenti a "un'API" nella documentazione sono relazioni
+`REFERENCES` verso il simbolo reale (`:Function`/`:Class`/`:Macro`/`:Type`/
+`:KconfigOption`), non un nodo sintetico.
+
+## RELATIONSHIP SCHEMA (AGGIORNATO v5)
+
+| Relationship | Start → End | Origine | Confidence tipica |
+|---|---|---|---|
+| `CONTAINS` | Folder → Folder\|SourceFile | scansione filesystem | 1.0 (certa) |
+| `HAS_CHUNK` | SourceFile → SourceChunk | chunking | 1.0 |
+| `DECLARES` | SourceFile → Function\|Class\|Type\|Macro\|Variable | parser di linguaggio | 1.0 |
+| `INCLUDES` | SourceFile → SourceFile | `#include`/`import` risolto contro l'albero file reale | 1.0 se risolto nell'albero, 0.5 se riferimento esterno non risolvibile (es. header Zephyr non presente in `raw_data/`) |
+| `CALLS` | Function → Function | `call_expression`/`ast.Call` risolto contro la symbol table | 1.0 se univoco nello stesso file, 0.8 se univoco globale, scartato (→ `unresolved_relations.json`) se ambiguo |
+| `EXTENDS` | Class → Class | ereditarietà esplicita (basi Python, non comune in C) | 1.0 |
+| `DEPENDS_ON` | KconfigOption → KconfigOption | nodo `dependencies` di tree-sitter-kconfig | 1.0 |
+| `SELECTS` | KconfigOption → KconfigOption | nodo `reverse_dependencies` (`select`) | 1.0 |
+| `SETS` | SourceFile → KconfigOption | fragment `.conf`/`_defconfig`, con proprietà `value` | 1.0 |
+| `CHILD_OF` | DTNode → DTNode | nesting dei nodi devicetree | 1.0 |
+| `REFERENCES` (devicetree) | DTNode → DTNode | phandle `&label` risolto contro l'indice delle label | 1.0 se univoco, altrimenti scartato |
+| `COMPATIBLE_WITH` | DTNode → DTBinding | proprietà `compatible` risolta contro `dts/bindings/**` | 1.0 se il binding esiste in `raw_data/`, altrimenti ambiguità loggata |
+| `HAS_SECTION` | Document → Concept | titolo/heading | 1.0 |
+| `CONTAINS` (requirement) | Document → Requirement | frase con verbo modale | 1.0 |
+| `REFERENCES` (documentazione) | Document → Function\|Class\|Type\|Macro\|KconfigOption\|SourceFile\|Document | ruolo Sphinx/RST o code span Markdown risolto contro la symbol table, con proprietà `role` (es. `"c:func"`, `"kconfig:option"`, `"ref"`, `"file"`) | 1.0 se risolto univocamente |
+| `SATISFIES` | Requirement → Function\|Class\|KconfigOption | SOLO se la stessa frase del requisito contiene un `REFERENCES` già risolto verso quel simbolo | 0.9 |
+
+Ogni relazione porta comunque `source_file`, `line`, `rationale`, e quando
+disponibile `evidence_chunk_uid`, coerentemente con l'impianto di provenance
+già in uso in v1/v2.
+
+## DOC-TO-CODE LINKING RULES (NUOVA SEZIONE, SOSTITUISCE IL CROSS-LINKING PER NOME DI v2)
+
+Il cross-linking documentazione↔codice di v2 usava
+`nodes_by_name[entity.name.casefold()]` su TUTTA la repository: qualunque
+parola in un documento che corrispondesse per caso al nome di un simbolo in
+un file scorrelato produceva una relazione. Questo è **vietato** in v5.
+
+Le uniche fonti ammesse per collegare un documento a un simbolo di codice
+sono marcatori strutturali espliciti:
+
+1. **Ruoli Sphinx/RST** (`:c:func:`, `:c:struct:`, `:c:macro:`, `:c:type:`,
+   `:c:enum:`, `:cpp:func:`, `:option:`, `:kconfig:option:`, `:file:`,
+   `:ref:`, `:term:`): estratti dal nodo `role` + `interpreted_text` di
+   tree-sitter-rst, poi risolti contro la symbol table (funzioni/tipi/macro/
+   opzioni Kconfig) o l'indice dei file. Se il target non risolve contro
+   nessuna entità reale, la relazione NON viene creata: va registrata in
+   `ambiguities.json` con motivo `"reference target not found in inventory"`.
+2. **Code span Markdown** (`` `nome` `` o blocco ` ``` `): stesso principio,
+   risolto solo se `nome` corrisponde esattamente (case-sensitive) a un
+   simbolo già estratto da un parser.
+3. **Ancore RST** (`.. _label:`) per risolvere `:ref:` verso il documento o
+   la sezione di destinazione esatta, non un match testuale.
+
+Se un simbolo è menzionato in prosa libera senza uno di questi marcatori,
+NON produce una relazione. È un compromesso esplicito: meno collegamenti,
+ma ogni collegamento rimasto è verificabile risalendo al marcatore esatto.
+
+## REQUIREMENT EXTRACTION (INASPRITO)
+
+Un nodo `:Requirement` è creato SOLO se la frase contiene esplicitamente uno
+dei verbi modali `shall|must|should|required to` (il gruppo non è opzionale,
+a differenza del regex di v2 che rendeva questi verbi facoltativi e per
+questo catturava frasi come "API allows you to..." come requisito). La
+frase intera è l'evidenza (`text`), la relazione `SATISFIES` verso
+un'implementazione è creata solo se la stessa frase contiene anche un
+riferimento Sphinx/RST già risolto (vedi DOC-TO-CODE LINKING RULES).
+
+## CONFIDENCE SCORE - DEFINIZIONE RIGOROSA (INVARIATO)
+Il confidence score (0-1) è **proprietà esclusiva della relazione**, mai
+dell'entità.
+
+| Range | Significato |
+|-------|-------------|
+| 1.0 | Fatto strutturale certo (dichiarazione esplicita nel parser: `DECLARES`, `HAS_CHUNK`, `CONTAINS`, `DEPENDS_ON`, `SELECTS`, `SETS`, `CHILD_OF`) |
+| 0.8-0.95 | Risoluzione per nome univoca ma cross-file (`CALLS` globale, `REFERENCES` da ruolo risolto) |
+| 0.5-0.79 | Riferimento esterno non risolvibile nell'albero locale (es. header Zephyr non presente in `raw_data/`), mantenuto per tracciabilità ma marcato come non verificato localmente |
+| <0.5 | Non usare: se la relazione è così incerta, va scartata e loggata in `ambiguities.json`, non ingerita con basso punteggio |
+
+## INCREMENTAL UPDATE SPECIFICATION (NUOVA SEZIONE, MANDATORY)
+
+Obiettivo: dopo la prima ingestion completa, un cambiamento in `/raw_data/`
+(file aggiunto, modificato, rimosso) deve poter essere riflesso nel grafo
+ri-processando SOLO i file cambiati, non l'intera repository.
+
+### Manifest
+`/output/ingestion_manifest.json`:
+```json
+{
+  "generated_at": "<iso8601>",
+  "files": {
+    "<relative_path>": {"sha256": "<hex>", "size_bytes": int, "mtime": float}
+  }
+}
 ```
 
-**Giustificazione**: Senza indici, query su 140k nodi richiedono scan completi (O(n)). Con indici, lookup è O(log n).
+### Modalità CLI
+- `--full` (default se il manifest non esiste): processa tutti i file.
+- `--update`: cammina comunque l'intero `/raw_data/` (per rilevare file
+  rimossi, che altrimenti non sarebbero mai notati), calcola l'hash sha256
+  di ogni file e lo confronta col manifest precedente per ottenere tre
+  insiemi: `added`, `modified`, `removed`. I file `unchanged` NON vengono
+  riletti né riparsati: le loro entità/relazioni/chunk precedenti (caricati
+  da `entities.jsonl`/`relations.jsonl`/`source_chunks.jsonl`) sono
+  riutilizzati as-is.
+- Per `added`/`modified`: eseguire l'estrazione strutturale (Livello 1) solo
+  su questi file.
+- Per `removed`: rimuovere dal set in memoria tutte le entità/relazioni con
+  `source_file` uguale al file rimosso, e produrre l'elenco dei file da
+  cancellare da Memgraph.
+- Il cross-linking (Livello 3: symbol table, CALLS, riferimenti
+  documentazione↔codice) va SEMPRE ricalcolato sull'intero insieme di
+  entità in memoria dopo il merge added/modified/removed/unchanged, perché
+  un file cambiato può risolvere o invalidare riferimenti altrove. Questo
+  passo non richiede ri-lettura dei file, quindi resta rapido anche su
+  repository grandi.
 
-## LOGGING STRATEGY
+### Identità stabile dei nodi (condizione necessaria per l'upsert)
+Gli uid devono essere deterministici e dipendere solo da
+`(entity_type, file, name)` (o solo `(entity_type, name)` per i tipi a
+scope globale: `KconfigOption`, `DTBinding`), MAI da un contatore o da un
+timestamp, altrimenti l'aggiornamento incrementale non può fare `MERGE`
+sullo stesso nodo tra due run.
+
+### Ingestion incrementale in Memgraph
+1. Per ogni file in `added ∪ modified ∪ removed`, eseguire
+   `MATCH (n) WHERE n.file = $file OR n.path = $file DETACH DELETE n`
+   prima di re-ingerire, cosi' i simboli rimossi da un file modificato non
+   restano come nodi orfani.
+2. Re-ingerire con lo stesso pattern `MERGE` idempotente già in uso per il
+   caricamento completo (upsert per `uid`), cosi' i nodi invariati non
+   vengono duplicati.
+3. Salvare il nuovo manifest solo se l'ingestion ha successo.
+
+## GRAPH SCHEMA DEFINITION (MANDATORY, INVARIATO)
+Lo script DEVE generare `/output/graph_schema.json` con `node_labels`
+(label, count, required_properties), `relationship_types` (type, count,
+start_labels, end_labels), `indexes_created`.
+
+## MEMGRAPH INGESTION SPECIFICATION
+- Indici per-label in autocommit separato (compatibilità Memgraph), come in
+  v1/v2.
+- Clean-load (`MATCH (n) DETACH DELETE n`) solo in modalità `--full`; MAI in
+  modalità `--update`.
+- Verifica post-ingestion: confronto `exported_count == ingested_count` per
+  ogni label e per il conteggio totale delle relazioni.
+
+## LOGGING STRATEGY (INVARIATO)
 | Livello | File | Contenuto |
 |---------|------|-----------|
-| 1 | `level_1_structural.log` | File processati, entità estratte, errori parsing |
-| 2 | `level_2_semantic.log` | Concetti impliciti, pattern architetturali, decisioni confidence |
-| 3 | `level_3_crosslink.log` | Match codice-doc, entity resolution, ambiguità |
-| 4 | `level_4_graph.log` | Metriche grafo, indici creati, verifica ingestion |
-| Access | `access_log.jsonl` | Tutti i file letti con validazione scope |
+| 1 | `extraction_ops_level_1.log` | Inventario file, chunking, parsing per-linguaggio |
+| 2 | `extraction_ops_level_2.log` | Estrazione semantica documentazione (RST/Markdown), Kconfig fragment |
+| 3 | `extraction_ops_level_3.log` | Cross-linking, symbol table, resolution CALLS/REFERENCES/phandle |
+| 4 | `extraction_ops_level_4.log` | Metriche di grafo, nodi isolati |
+| Access | `access_log.jsonl` | Tutti i file letti, con esito scope-check |
 
-## GESTIONE ERRORI (CONTEXT-AWARE)
-| Scenario | Azione | Log |
-|----------|--------|-----|
-| File non leggibile (encoding) | Skip con warning, tenta encoding alternativo | `parse_errors.log` |
-| Syntax error nel codice | Estrai comunque entità parsabili, segnala limite | `parse_errors.log` |
-| Documentazione malformattata | Estrai testo raw, flag `unstructured` | `parse_errors.log` |
-| Memoria insufficiente | Processa file-by-file con garbage collection intermedia | `level_X.log` |
-| Violazione isolamento | Fallire con exit code 1 | `access_log.jsonl` |
-| Memgraph connection failure | Fallire con exit code 1, logga errore | `level_4_graph.log` |
+## GESTIONE ERRORI
+| Scenario | Azione |
+|----------|--------|
+| File non leggibile o binario | `:SourceFile` comunque creato, nessun chunk/parsing, loggato |
+| Parser tree-sitter produce nodi `ERROR` | Continuare la camminata sui figli non-errore (tree-sitter è error-tolerant); non fallire l'intero file |
+| Riferimento doc→codice non risolvibile | Scartare la relazione, loggare in `ambiguities.json` |
+| CALLS/phandle ambiguo (>1 candidato) | Scartare, loggare in `unresolved_relations.json` con tutti i candidati |
+| Provenance mancante su una relazione | Fallire con exit code 1 |
+| Memgraph connection failure | Fallire con exit code 1 |
+| Conteggio file discovered/exported/ingested non coincide | Fallire con exit code 1 |
 
-## AMBIGUITÀ SEGNALATE (OBBLIGATORIO)
-Genera report `/output/ambiguities.json` per:
+## VINCOLO DI ISOLAMENTO (AGGIORNATO v5)
+**Fonte dati per l'estrazione**: `/raw_data/` e tutte le sue sottocartelle.
+Nessun accesso a rete a runtime durante l'estrazione (i parser sono
+librerie locali già installate).
 
-1. **Nomi generici**: ["config", "data", "temp", "buf", "handler", "manager"]
-2. **Relazioni a bassa confidence** (< 0.6)
-3. **Entità isolate** (degree = 0)
-4. **Discrepanze codice-documentazione**
-5. **Pattern ambigui** (funzioni >100 righe senza commenti, violazioni SRP)
+**PERMESSO** (revoca esplicita del divieto v2 "no nuove dipendenze", che è
+causa diretta del fallback a regex):
+- Standard library Python
+- `mgclient`, `PyYAML` (già presenti)
+- `tree_sitter`, `tree_sitter_language_pack` (da aggiungere a
+  `python_venv_requirements.txt`; installazione una tantum in fase di setup
+  ambiente, non a runtime dello script di estrazione)
 
-## POST-PROCESSING
-1. **Normalizzazione nomi**: lowercase, rimozione prefissi comuni
-2. **Deduplicazione cross-file**: Entità con nome identico + signature simile = merge con confidence weighting
-3. **Consolidamento relazioni**: Relazioni duplicate con gli stessi endpoint UID e tipo
-   = merge con max confidence; relazioni omonime in file diversi NON sono duplicate
-4. **Export finale**: Formato coerente con `example_ingest_data.py`
+**VIETATO**: qualunque dipendenza non elencata sopra o non giustificata da
+una riga della tabella PARSER REQUIREMENTS.
 
-## ISTRUZIONI ARCHITETTURALI (DA example_ingest_data.py)
-**VINCOLANTE**: Analizzare `/DB/example_ingest_data.py` per estrarre:
-- Struttura delle classi/funzioni dello script
-- Query database utilizzate (caricamento, inserimento, update)
-- Librerie importate e loro uso specifico
-- Pattern di gestione errori
-
-**Integrazione**: Lo script generato DEVE seguire l'architettura dell'esempio, adattandola al caso d'uso multi-livello descritto.
-
-## MEMGRAPH INGESTION SPECIFICATION (CRITICAL)
-
-### Node Ingestion (Type-Specific Labels)
-```cypher
-// FUNZIONE - Label specifico, non :Entity generico
-MERGE (n:Function {uid: $uid})
-SET n.line_start = $line_start, 
-    n.line_end = $line_end, 
-    n.signature = $signature,
-    n.confidence = $confidence
-
-// CLASS - Label specifico
-MERGE (n:Class {uid: $uid})
-SET n.line_start = $line_start,
-    n.extends = $extends,
-    n.confidence = $confidence
-
-// DOCUMENT - Label specifico
-MERGE (n:Document {uid: $uid, path: $path})
-SET n.title = $title, n.type = $doc_type
-```
-
-### Relationship Ingestion (Explicit Types)
-```cypher
-// CALLS - Tipo esplicito, non :RELATED {predicate: "CALLS"}
-MATCH (caller:Function {uid: $caller_uid})
-MATCH (callee:Function {uid: $callee_uid})
-MERGE (caller)-[r:CALLS]->(callee)
-SET r.confidence = $confidence, r.line = $line
-
-// CONTAINS - Tipo esplicito
-MATCH (module:Module {uid: $module_uid})
-MATCH (func:Function {uid: $func_uid})
-MERGE (module)-[r:CONTAINS]->(func)
-SET r.confidence = 1.0
-
-// DESCRIBES - Cross-link codice-documentazione
-MATCH (doc:Document {uid: $doc_uid})
-MATCH (func:Function {uid: $func_uid})
-MERGE (doc)-[r:DESCRIBES]->(func)
-SET r.confidence = $confidence, r.rationale = $rationale
-```
-
-### ENTITY IDENTITY AND RELATIONSHIP SAFETY (MANDATORY)
-Entity names are not globally unique in a multi-file codebase. Every node MUST have a
-deterministic `uid` containing its label and source path (for example
-`Function|src/a.py|process_data`). Use `uid` for all `MERGE` and relationship endpoint
-lookups; never resolve endpoints by `name` alone.
-
-Every exported relation MUST retain source provenance and resolve to exactly one
-source node and one target node. Relationship ingestion MUST:
-
-1. Match by endpoint `uid` (or by `(label, name, file/path)` with a uniqueness check).
-2. Reject and log ambiguous or unresolved endpoints instead of using `LIMIT 1` or
-   creating a Cartesian product.
-3. Never use an untyped `MATCH (a)`/`MATCH (b)` name lookup.
-4. Verify that the number of ingested relationships equals the number of resolvable
-   exported relations; report skipped relations with their reason and source line.
-5. Preserve endpoint labels and source paths in `graph_schema.json`.
-
-Before a normal ingestion run, the script MUST perform a clean-load operation
-(`MATCH (n) DETACH DELETE n`) unless an explicit `--append` option is supplied.
-The clean-load result and the final node/relationship counts MUST be logged.
-
-### Index Creation (Pre-Ingestion)
-```cypher
-CREATE INDEX ON :Function(name);
-CREATE INDEX ON :Function(file);
-CREATE INDEX ON :Class(name);
-CREATE INDEX ON :Module(path);
-CREATE INDEX ON :Document(path);
-CREATE INDEX ON :Requirement(text);
-```
-
-Memgraph versions that do not support `IF NOT EXISTS` MUST be handled by executing
-each index DDL statement in its own autocommit transaction and treating only an
-already-existing-index error as non-fatal. Index DDL MUST NOT be issued inside a
-multi-command transaction.
-
-### Verification Query (Post-Ingestion)
-```cypher
-// Verifica conteggio per label
-MATCH (n:Function) RETURN count(n) AS functions;
-MATCH (n:Class) RETURN count(n) AS classes;
-MATCH (n:Document) RETURN count(n) AS documents;
-
-// Verifica conteggio per relationship type
-MATCH ()-[r:CALLS]->() RETURN count(r) AS calls;
-MATCH ()-[r:CONTAINS]->() RETURN count(r) AS contains;
-MATCH ()-[r:DESCRIBES]->() RETURN count(r) AS describes;
-
-// Verifica entità isolate
-MATCH (n) WHERE NOT (n)--() RETURN count(n) AS isolated;
-```
-
-## QUALITÀ ATTESA (ONE-TIME EXECUTION)
-- **Completezza**: Estrazione esaustiva di tutte le entità identificabili
-- **Graph-Native Model**: Label tipizzati per nodi, relationship type espliciti
-- **Query Efficiency**: Indici creati per proprietà di lookup frequenti
-- **Tracciabilità**: Ogni entità/relazione riferibile a file + riga
-- **Agent-Ready**: Query pattern ottimizzati per agent downstream
+## PRIORITÀ OPERATIVE
+1. File inventory completo (ogni file ha un nodo `:SourceFile`)
+2. Source chunking (ogni file testo è segmentato)
+3. Estrazione strutturale SOLO tramite i parser assegnati in PARSER REQUIREMENTS
+4. Doc-to-code linking SOLO tramite marcatori strutturali (mai prosa libera)
+5. Entity resolution rigoroso (scartare ambigui invece di indovinare)
+6. Aggiornamento incrementale (manifest + MERGE, mai un reload completo per
+   una singola modifica)
 
 ## NOTA OPERATIVA FINALE
-
-Questo script è un **surrogato di un processo umano+AI** che conoscerà il codebase in profondità. L'obiettivo non è automazione perfetta, ma **evidenziazione sistematica** di nodi e relazioni che un team di sviluppatori identificherebbe in una code review collaborativa.
-
-### VINCOLO DI ISOLAMENTO (MANDATORY)
-**Fonte dati unica**: `/raw_data/` e tutte le sue sottocartelle.
-
-**VIETATO**:
-- Accesso a internet (HTTP/HTTPS, API remote, DNS lookup)
-- Lettura da filesystem esterni a `/raw_data/`, `/DB/`, `/output/`, `/logs/`
-- Import di moduli non presenti in standard library o già installati nel runtime
-- Download o installazione di nuove dipendenze durante l'esecuzione
-
-**PERMESSO**:
-- Standard library Python
-- Librerie già installate nel runtime (es. `mgclient`, `yaml`)
-- Moduli definiti all'interno di `/raw_data/` (da analizzare come parte del codebase)
-- Directory di output: `/output/`, `/logs/`
-
-### VERIFICA TECNICA
-Lo script DEVE:
-1. Loggare tutti i file letti in `/logs/access_log.jsonl`
-2. Risolvere symlink e validare target entro `/raw_data/`
-3. Fallire con exit code 1 se violazioni rilevate
-4. Flaggaare URL/risorse esterne nel contenuto dei file
-
-### MEMGRAPH INGESTION (MANDATORY)
-Dopo estrazione e validazione export, eseguire lo script generato **senza** `--skip-db` per caricare il grafo in Memgraph.
-
-**Requisiti**:
-- Usare `connect_memgraph()` e `ingest_memgraph()` implementate
-- Preservare configurazione HOST, PORT, USERNAME, PASSWORD
-- Completare export file prima dell'ingestion
-- Fallire con exit code non-zero se connection o query falliscono
-- Loggare start, completion, failure in `level_4_graph.log`
-- Verificare post-ingestion con query di conteggio per label e relationship type
-
-**Verifica Obbligatoria**:
-```python
-# Dopo ingestion, eseguire query di verifica
-verify_query = """
-MATCH (n)
-WITH count(DISTINCT labels(n)) AS unique_labels
-MATCH ()-[r]->()
-RETURN unique_labels, count(DISTINCT type(r)) AS unique_relationship_types
-"""
-# Se unique_labels < 5, segnalare warning: modello dati non ottimale
-# Se unique_relationship_types < 8, segnalare warning: relazioni troppo generiche
-```
-
-The verification MUST also compare exported and ingested counts per relationship
-type, detect duplicate `(source_uid, relationship_type, target_uid)` triples, and
-fail with a non-zero exit code when unexpected multiplication or unresolved endpoint
-expansion is detected.
-
-### PRIORITÀ OPERATIVE
-1. **Modello dati graph-native**: Label tipizzati, relationship type espliciti
-2. **Relazioni semantiche**: Priorità a relazioni non ovvie dall'AST
-3. **Ambiguità esplicite**: Segnalare invece di risolvere arbitrariamente
-4. **Tracciabilità completa**: File + riga per ogni entità/relazione
-
-### RAZIONALE
-Questo approccio garantisce:
-- **Query Efficiency**: Agent downstream possono fare traversal specifici (O(log n) vs O(n))
-- **Pattern Matching**: Query come `MATCH (f:Function)-[:CALLS]->(g:Function)` sono native
-- **Graph Algorithms**: Centrality, community detection funzionano su tipi specifici
-- **Manutenibilità**: Schema esplicito documentato in `graph_schema.json`
-```
+Il trade-off resta lo stesso di v2: meno entità totali a fronte di
+accuratezza verificabile. La differenza rispetto a v2 è che ora
+"verificabile" significa "prodotto da un parser del linguaggio o da un
+marcatore strutturale esplicito", non "prodotto da una regex che nella
+pratica ha estratto rumore".

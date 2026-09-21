@@ -1,6 +1,0 @@
-2026-09-14 22:12:24,888 INFO Starting structural extraction for 19645 files
-2026-09-14 22:14:08,142 WARNING Syntax error in connectedhomeip/scripts/tests/chiptest/glob_matcher.py: invalid syntax (connectedhomeip/scripts/tests/chiptest/glob_matcher.py, line 1)
-2026-09-14 22:20:13,510 INFO Structural extraction complete: 116409 entities, 217867 relations
-2026-09-15 08:55:33,358 INFO Starting structural extraction for 19645 files
-2026-09-15 08:57:03,052 WARNING Syntax error in connectedhomeip/scripts/tests/chiptest/glob_matcher.py: invalid syntax (connectedhomeip/scripts/tests/chiptest/glob_matcher.py, line 1)
-2026-09-15 09:03:23,607 INFO Structural extraction complete: 116409 entities, 217867 relations
