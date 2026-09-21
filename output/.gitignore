@@ -1,13 +1,4 @@
-# These must be ignored because could contain data about the user system paths
-# ambiguities.json
-# entities.jsonl
-# graph_schema.json
-# ingestion_manifest.json
-# relations.jsonl
-# source_chunks.jsonl
-# unresolved_relations.json
-
-# Ignore everything in the output folder
+# Ignore everything in the output folder exept for the extraction_scripts
 *
 !extraction_script.py
 !/*/extraction_script.py

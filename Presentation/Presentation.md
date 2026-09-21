@@ -119,7 +119,6 @@ Connettori come Atrassian MCP rimarrebbero fondamentali per permettere un access
 | "Cerca per intent, non keyword" | Dense vector search | Limitato semantic |
 | "Filtra per language + file pattern + entity type" | Structured filters | Filtri base |
 
-
 # Spunti di evoluzione:
 - Inserire una "Cache" persistente di memoria ad uso del modello stesso, costruita secondo regole precise. In questo modo un qualsiasi modello che usa questo grafo può evitare query ricorrenti. (Da definire/testare)
 - esposizione di tool strutturati tramite mcp tool interface, es:
