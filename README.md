@@ -1,4 +1,4 @@
-# AG_RAG_System, Evidence-Backed Graph-RAG Knowledge Base for code intelligence and other AI applications
+# AG_RAG_System: Evidence-Backed Graph-RAG Knowledge Base for code intelligence and other AI applications
 
 This repository is an implementation of techniques for building a Graph based on a real dataset composed of files of various types, such as code and/or documentation.
 
@@ -71,7 +71,7 @@ In literature, this approach is called **"Evidence-Backed Knowledge Graph"** or 
 ```
 
 ### 4. **Multi-Layer Graph Architecture**
-Your layered structure (File → Chunk → Entity → Relation) implements a pattern known as:
+The layered structure (File → Chunk → Entity → Relation) implements a pattern known as:
 - **Physical Layer**: File system inventory
 - **Logical Layer**: Source chunks
 - **Semantic Layer**: Typed entities
@@ -79,7 +79,7 @@ Your layered structure (File → Chunk → Entity → Relation) implements a pat
 This architecture is documented in systems such as **Amazon Neptune ML** and **Neo4j Knowledge Graph pipelines**.
 
 ### 5. **RAG Infrastructure Pattern** (Retrieval-Augmented Generation)
-Your graph is designed as a **knowledge base for downstream agents**, which classifies it as advanced RAG infrastructure:
+The output graph could be classified as a **knowledge base for downstream agents**, which involves:
 - **Graph-RAG**: Retrieval based on graph traversal instead of vector similarity
 - **Hybrid Retrieval**: Combination of structured lookup (graph) + full-text (chunks)
 
